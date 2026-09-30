@@ -21,7 +21,17 @@
  *                                                       // (equivalent to button down+up; servers handle both)
  *     { type: 'input', action: 'scroll', dx, dy, x, y }
  *     { type: 'input', action: 'key', key, down, repeat, ctrlKey, altKey, shiftKey, metaKey }
+ *     { type: 'input', action: 'type', text }        // type a whole string
  *     { type: 'ping', t }                              -> { type:'pong', t }
+ *     { type: 'file_start', name, size }               -> { type:'file_ack' } | { type:'file_error', message }
+ *     { type: 'file_chunk', name, index, data }        // ~48KB base64 chunks
+ *     { type: 'file_end', name, chunks }               -> { type:'file_done', name, size } | { type:'file_error', message }
+ *     { type: 'file_get_list' }                       -> { type:'file_list', files:[{name,size}] }
+ *     { type: 'file_dl', name }                       -> { type:'dl_start', name, size, chunks }
+ *                                                       + { type:'dl_chunk', name, index, data }*
+ *                                                       + { type:'dl_end', name }
+ *     { type: 'file_delete', name }                    -> { type:'file_deleted', name } | { type:'file_error', message }
+ *     { type: 'file_rename', old, new }                -> { type:'file_renamed', old, new } | { type:'file_error', message }
  *
  *   Server -> Client:
  *     { type: 'auth_ok', tfa_enabled? } | { type: 'auth_error', message }
@@ -84,6 +94,8 @@
     kbCapture: false,
     stickyMods: { ctrl: false, alt: false, shift: false, meta: false },
     connecting: false,
+    filesOpen: false,
+    dl: null,               // active download: { name, size, chunks:[], received, expected }
   };
 
   var IS_TOUCH = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
@@ -116,6 +128,14 @@
       kbBtn = $('kb-btn'), fitBtn = $('fit-btn'),
       viewport = $('viewport'), frameImg = $('frame-img'), sessionMsg = $('session-msg'),
       keybar = $('keybar'), keyCatcher = $('key-catcher'),
+      typeBtn = $('type-btn'), typeDialog = $('type-dialog'), typeText = $('type-text'),
+      typeSend = $('type-send'), typeCancel = $('type-cancel'),
+      uploadBtn = $('upload-btn'), filesBtn = $('files-btn'),
+      filesPanel = $('files-panel'), filesClose = $('files-close'),
+      filesRefresh = $('files-refresh'), filesUpload = $('files-upload'),
+      fileList = $('file-list'), filePicker = $('file-picker'),
+      transferProgress = $('transfer-progress'), transferBar = $('transfer-bar'),
+      transferLabel = $('transfer-label'),
       toastEl = $('toast');
 
   /* ---------------- Screens & toast ---------------- */
@@ -351,6 +371,80 @@
 
       case 'idle_timeout':
         endSession('Disconnected for inactivity.');
+        break;
+
+      /* ---------------- File transfer replies ---------------- */
+      case 'file_ack':
+        // Host accepted the upload — chunks are flowing; progress is local.
+        break;
+
+      case 'file_error':
+        hideProgress();
+        state.dl = null;
+        toast('File error: ' + (msg.message || 'something went wrong'));
+        break;
+
+      case 'file_done':
+        hideProgress();
+        toast('✅ Uploaded "' + (msg.name || 'file') + '" to the PC!');
+        refreshFileList();
+        break;
+
+      case 'file_list':
+        renderFileList(Array.isArray(msg.files) ? msg.files : []);
+        break;
+
+      case 'dl_start':
+        state.dl = {
+          name: msg.name || 'download',
+          size: +msg.size || 0,
+          chunks: [],
+          received: 0,
+          expected: +msg.chunks || 0,
+        };
+        setProgress('Downloading ' + state.dl.name, 0);
+        break;
+
+      case 'dl_chunk': {
+        var dlc = state.dl;
+        if (!dlc || typeof msg.data !== 'string') break;
+        dlc.chunks[+msg.index || 0] = msg.data;
+        dlc.received++;
+        if (dlc.expected) setProgress('Downloading ' + dlc.name, dlc.received / dlc.expected);
+        break;
+      }
+
+      case 'dl_end': {
+        var dl = state.dl;
+        state.dl = null;
+        hideProgress();
+        if (!dl) break;
+        try {
+          var bin = atob(dl.chunks.join(''));
+          var u8 = new Uint8Array(bin.length);
+          for (var bi = 0; bi < bin.length; bi++) u8[bi] = bin.charCodeAt(bi);
+          var blob = new Blob([u8], { type: 'application/octet-stream' });
+          var a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = dl.name || 'download';
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 4000);
+          toast('⬇️ Downloaded "' + dl.name + '"');
+        } catch (e) {
+          toast('Download failed — the file was corrupted.');
+        }
+        break;
+      }
+
+      case 'file_deleted':
+        toast('🗑️ Deleted "' + (msg.name || 'file') + '"');
+        refreshFileList();
+        break;
+
+      case 'file_renamed':
+        toast('✏️ Renamed to "' + (msg.new || 'file') + '"');
+        refreshFileList();
         break;
 
       default:
@@ -718,6 +812,12 @@
     clearInterval(state.pingTimer); state.pingTimer = null;
     if (state.pongWatchdog) { clearTimeout(state.pongWatchdog); state.pongWatchdog = null; }
     try { keyCatcher.blur(); } catch (e) {}
+    // Close the new session UI too.
+    typeDialog.classList.add('hidden');
+    typeText.value = '';
+    closeFilesPanel();
+    state.dl = null;
+    hideProgress();
     showScreen('home');
     refreshStatuses();
     if (message) toast(message, 4000);
@@ -743,9 +843,9 @@
   }
 
   function sendInput(obj) {
-    if (!state.session) return;
+    if (!state.session) return false;
     obj.type = 'input';
-    send(obj);
+    return send(obj);
   }
 
   /* ---------------- Mouse (desktop) ---------------- */
@@ -903,6 +1003,9 @@
 
   function handleKey(e, down) {
     if (!state.session || !state.kbCapture) return;
+    // Typing in the Type-text dialog must not also leak keystrokes to the PC.
+    var t = e.target;
+    if (t && t !== keyCatcher && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
     // Don't hijack browser-reserved shortcuts the page can't override anyway;
     // but stop keys that would scroll/move focus in this page.
     if (down && PREVENT_KEYS[e.key] && !e.ctrlKey && !e.metaKey) e.preventDefault();
@@ -956,6 +1059,205 @@
     }, 90);
     clearStickyMods();
   });
+
+  /* ---------------- Type-text dialog ---------------- */
+  typeBtn.addEventListener('click', function () {
+    if (!state.session) { toast('Connect to a computer first.'); return; }
+    typeText.value = '';
+    typeDialog.classList.remove('hidden');
+    setTimeout(function () { try { typeText.focus({ preventScroll: true }); } catch (e) {} }, 60);
+  });
+  typeCancel.addEventListener('click', function () {
+    typeDialog.classList.add('hidden');
+    typeText.value = '';
+  });
+  function sendTypedText() {
+    var text = typeText.value;
+    typeDialog.classList.add('hidden');
+    typeText.value = '';
+    if (!text) return;
+    if (!sendInput({ action: 'type', text: text })) toast('Not connected to the server.');
+    else toast('Sent to PC ⌨️');
+  }
+  typeSend.addEventListener('click', sendTypedText);
+
+  // Mobile soft keyboard: keydown events often arrive with key='Unidentified'
+  // for real letters, so typed text goes nowhere via per-key capture. The
+  // input event carries the actual characters — type them and clear the field.
+  // (Existing per-key capture above is kept untouched.)
+  keyCatcher.addEventListener('input', function (e) {
+    if (!state.session || !state.kbCapture) { keyCatcher.value = ''; return; }
+    var v = keyCatcher.value;
+    keyCatcher.value = '';
+    if (e.inputType === 'deleteContentBackward' || e.inputType === 'deleteContentForward') {
+      sendInput({ action: 'key', key: 'Backspace', down: true });
+      setTimeout(function () { sendInput({ action: 'key', key: 'Backspace', down: false }); }, 60);
+      return;
+    }
+    var text = String(v).replace(/\r?\n/g, ''); // Enter is already handled by keydown
+    if (text) sendInput({ action: 'type', text: text });
+  });
+
+  /* ---------------- File transfer ---------------- */
+  var MAX_UPLOAD = 100 * 1024 * 1024;  // 100 MB cap, matches the host
+  var CHUNK_BIN = 36 * 1024;           // binary bytes → ~48KB base64 per chunk
+
+  function b64encodeBytes(u8) {
+    var s = '';
+    for (var i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+    return btoa(s);
+  }
+
+  function fmtSize(n) {
+    n = +n || 0;
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+    return (n / 1073741824).toFixed(2) + ' GB';
+  }
+
+  function setProgress(label, frac) {
+    frac = Math.min(1, Math.max(0, frac));
+    transferProgress.classList.remove('hidden');
+    transferBar.style.width = Math.round(frac * 100) + '%';
+    transferLabel.textContent = label + ' ' + Math.round(frac * 100) + '%';
+  }
+  function hideProgress() {
+    transferProgress.classList.add('hidden');
+    transferBar.style.width = '0%';
+    transferLabel.textContent = '';
+  }
+
+  /* ----- Files panel ----- */
+  function openFilesPanel() {
+    filesPanel.classList.remove('hidden');
+    state.filesOpen = true;
+    refreshFileList();
+  }
+  function closeFilesPanel() {
+    filesPanel.classList.add('hidden');
+    state.filesOpen = false;
+  }
+  filesBtn.addEventListener('click', function () {
+    if (!state.session) { toast('Connect to a computer first.'); return; }
+    if (state.filesOpen) closeFilesPanel();
+    else openFilesPanel();
+  });
+  filesClose.addEventListener('click', closeFilesPanel);
+  filesRefresh.addEventListener('click', refreshFileList);
+
+  function refreshFileList() {
+    if (!state.session) return;
+    if (!send({ type: 'file_get_list' })) toast('Not connected to the server.');
+    // Host replies { type:'file_list', files:[{name,size}] }.
+  }
+
+  function renderFileList(files) {
+    fileList.innerHTML = '';
+    if (!files.length) {
+      fileList.innerHTML = '<p class="muted small center">No files yet — upload one! 📤</p>';
+      return;
+    }
+    files.forEach(function (f) {
+      var row = document.createElement('div');
+      row.className = 'file-row';
+      row.innerHTML =
+        '<div class="file-icon">📄</div>' +
+        '<div class="file-info"><div class="file-name"></div>' +
+        '<div class="file-size muted small"></div></div>' +
+        '<div class="file-actions">' +
+        '<button class="btn ghost small" title="Download">⬇️</button>' +
+        '<button class="btn ghost small" title="Rename">✏️</button>' +
+        '<button class="btn ghost small" title="Delete">🗑️</button>' +
+        '</div>';
+      row.querySelector('.file-name').textContent = f.name;
+      row.querySelector('.file-size').textContent = fmtSize(f.size);
+      var btns = row.querySelectorAll('.file-actions button');
+      btns[0].addEventListener('click', function () { downloadFile(f.name); });
+      btns[1].addEventListener('click', function () { renameFile(f.name); });
+      btns[2].addEventListener('click', function () { deleteFile(f.name); });
+      fileList.appendChild(row);
+    });
+  }
+
+  function downloadFile(name) {
+    if (!send({ type: 'file_dl', name: name })) { toast('Not connected to the server.'); return; }
+    state.dl = { name: name, size: 0, chunks: [], received: 0, expected: 0 };
+    setProgress('Downloading ' + name, 0);
+    // Host streams { type:'dl_start' } { type:'dl_chunk' }… { type:'dl_end' }.
+  }
+
+  function renameFile(oldName) {
+    var newName = prompt('Rename "' + oldName + '" to:', oldName);
+    if (newName === null) return;
+    newName = newName.trim();
+    if (!newName || newName === oldName) return;
+    if (!send({ type: 'file_rename', old: oldName, new: newName })) {
+      toast('Not connected to the server.');
+    }
+    // Host replies { type:'file_renamed' } or { type:'file_error' }.
+  }
+
+  function deleteFile(name) {
+    if (!confirm('Delete "' + name + '" from the office PC?')) return;
+    if (!send({ type: 'file_delete', name: name })) {
+      toast('Not connected to the server.');
+    }
+    // Host replies { type:'file_deleted' } or { type:'file_error' }.
+  }
+
+  /* ----- Upload (device → church PC) ----- */
+  uploadBtn.addEventListener('click', function () {
+    if (!state.session) { toast('Connect to a computer first.'); return; }
+    filePicker.click();
+  });
+  filesUpload.addEventListener('click', function () { filePicker.click(); });
+
+  filePicker.addEventListener('change', function () {
+    var f = filePicker.files && filePicker.files[0];
+    filePicker.value = '';
+    if (!f) return;
+    if (!state.session) { toast('Connect to a computer first.'); return; }
+    if (f.size > MAX_UPLOAD) {
+      toast('That file is over 100 MB — too big to send.');
+      return;
+    }
+    // Auto-open the files panel so the progress bar is visible.
+    openFilesPanel();
+    uploadFile(f);
+  });
+
+  function uploadFile(f) {
+    var reader = new FileReader();
+    reader.onload = function () {
+      var bytes = new Uint8Array(reader.result);
+      var totalChunks = Math.max(1, Math.ceil(bytes.length / CHUNK_BIN));
+      if (!send({ type: 'file_start', name: f.name, size: f.size })) {
+        toast('Not connected to the server.');
+        return;
+      }
+      setProgress('Uploading ' + f.name, 0);
+      var i = 0;
+      function nextChunk() {
+        if (!state.session) { toast('Upload stopped — session ended.'); hideProgress(); return; }
+        if (i >= totalChunks) {
+          send({ type: 'file_end', name: f.name, chunks: totalChunks });
+          return;
+        }
+        var slice = bytes.subarray(i * CHUNK_BIN, (i + 1) * CHUNK_BIN);
+        send({ type: 'file_chunk', name: f.name, index: i, data: b64encodeBytes(slice) });
+        i++;
+        setProgress('Uploading ' + f.name, i / totalChunks);
+        // Yield to the UI thread every 20 chunks so the bar actually moves.
+        if (i % 20 === 0) setTimeout(nextChunk, 0);
+        else nextChunk();
+      }
+      nextChunk();
+      // Host replies { type:'file_ack' } then { type:'file_done' } or { type:'file_error' }.
+    };
+    reader.onerror = function () { toast('Could not read that file.'); };
+    reader.readAsArrayBuffer(f);
+  }
 
   /* ---------------- Fit-to-screen toggle ---------------- */
   function setFitMode(fit) {

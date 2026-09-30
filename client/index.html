@@ -218,6 +218,9 @@
     <span class="stats"><span id="stat-fps">0 FPS</span> · <span id="stat-ping">— ms</span></span>
     <span class="spacer"></span>
     <button id="kb-btn" class="btn ghost small" title="Toggle keyboard">⌨️</button>
+    <button id="type-btn" class="btn ghost small" title="Type text">⌨️</button>
+    <button id="upload-btn" class="btn ghost small" title="Upload file to PC">📤</button>
+    <button id="files-btn" class="btn ghost small" title="Files on PC">📁</button>
     <button id="fit-btn" class="btn ghost small" title="Toggle fit-to-screen">⛶</button>
   </div>
 
@@ -240,6 +243,40 @@
   <!-- Hidden input: focusing it summons the soft keyboard on phones -->
   <input id="key-catcher" class="key-catcher" type="text" autocomplete="off"
          autocapitalize="off" autocorrect="off" spellcheck="false" aria-hidden="true" tabindex="-1">
+
+  <!-- Type-text dialog -->
+  <div id="type-dialog" class="dialog hidden">
+    <div class="dialog-card">
+      <h2>⌨️ Type text</h2>
+      <p class="muted small">Type below, hit Send — it appears on the office PC.</p>
+      <textarea id="type-text" rows="3" placeholder="Type something…"></textarea>
+      <div class="row-btns">
+        <button id="type-cancel" class="btn ghost">Cancel</button>
+        <button id="type-send" class="btn primary">Send ➤</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Files panel: ECFC-Uploads on the office PC -->
+  <aside id="files-panel" class="files-panel hidden">
+    <div class="files-head">
+      <h2>📁 PC files</h2>
+      <button id="files-close" class="btn ghost small">✕</button>
+    </div>
+    <p class="muted small">Files in <b>ECFC-Uploads</b> on the office PC.</p>
+    <div id="transfer-progress" class="progress hidden">
+      <div id="transfer-bar" class="progress-bar"></div>
+      <span id="transfer-label" class="progress-label"></span>
+    </div>
+    <div id="file-list" class="file-list"></div>
+    <div class="row-btns">
+      <button id="files-refresh" class="btn ghost">↻ Refresh</button>
+      <button id="files-upload" class="btn primary">📤 Upload</button>
+    </div>
+  </aside>
+
+  <!-- Hidden file picker for uploads -->
+  <input type="file" id="file-picker" class="hidden">
 </section>
 
 <div id="toast" class="toast hidden"></div>

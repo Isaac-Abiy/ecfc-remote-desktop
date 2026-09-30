@@ -275,6 +275,23 @@ async function handleHostMessage(hostEntry, msg) {
       }
       break;
 
+    // File transfer replies → forward to the paired client.
+    case 'file_ack':
+    case 'file_error':
+    case 'file_done':
+    case 'file_list':
+    case 'dl_start':
+    case 'dl_chunk':
+    case 'dl_end':
+    case 'file_deleted':
+    case 'file_renamed':
+      if (hostEntry.client) {
+        // Chunk payloads must be strings, like frames.
+        if (msg.type === 'dl_chunk' && typeof msg.data !== 'string') break;
+        send(hostEntry.client.ws, msg);
+      }
+      break;
+
     // Host says it's going away on purpose.
     case 'bye':
       log(`host-bye: '${hostEntry.computerId}' signing off`);
@@ -485,6 +502,30 @@ async function handleClientMessage(clientState, msg) {
       clientState.lastInputAt = Date.now();
       resetIdleTimer(hostEntry); // any input resets the 30-minute clock
       // Forward the whole input payload (action: move|click|key|scroll, ...).
+      send(hostEntry.ws, msg);
+      break;
+    }
+
+    // File transfer → relay to host (same pairing guard as input).
+    case 'file_start':
+    case 'file_chunk':
+    case 'file_end':
+    case 'file_get_list':
+    case 'file_dl':
+    case 'file_delete':
+    case 'file_rename': {
+      const hostEntry = clientState.computerId ? hosts.get(clientState.computerId) : null;
+      if (!hostEntry || hostEntry.client !== clientState) {
+        send(ws, { type: 'error', message: 'not connected to a host' });
+        return;
+      }
+      // Chunk payloads must be strings, like frames.
+      if (msg.type === 'file_chunk' && typeof msg.data !== 'string') {
+        send(ws, { type: 'error', message: 'bad chunk payload' });
+        return;
+      }
+      clientState.lastInputAt = Date.now();
+      resetIdleTimer(hostEntry); // transfers count as session activity
       send(hostEntry.ws, msg);
       break;
     }
