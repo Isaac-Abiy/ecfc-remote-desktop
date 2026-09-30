@@ -1,9 +1,11 @@
 // ============================================================================
 // ECFC Remote Desktop — Signaling Server
 // ----------------------------------------------------------------------------
-// A Node.js WebSocket server that pairs a Windows host agent with a remote
-// client (browser). It never interprets the screen/input payloads — it just
-// relays JSON messages between the one host and its one active client.
+// A Node.js WebSocket server that pairs a Windows host agent with remote
+// clients (browsers). It never interprets the screen/input payloads — it just
+// relays JSON messages between the one host and its attached clients.
+// Multiple clients may attach to (and control) the same computer at once;
+// each client gets its own session and its own idle timer.
 //
 // Accounts live in Supabase (rd_users): email + bcrypt password hash, with
 // optional TOTP two-factor auth (Google Authenticator style). Registered PCs
@@ -60,12 +62,16 @@ function log(...args) {
 // In-memory state
 //
 // hosts:   Map computerId -> hostEntry
-//            { ws, computerId, name, db: {id, owner_id} | null, client }
+//            { ws, computerId, name, db: {id, owner_id} | null,
+//              clients: Map<cid, clientState>, fileRequester: clientState | null }
 //
-// A clientState: { ws, authed, userId, email, computerId, sessionId,
+// A clientState: { cid, ws, authed, userId, email, computerId, sessionId,
 //                  idleTimer, lastInputAt }
 // ---------------------------------------------------------------------------
 const hosts = new Map();
+
+// Unique id per client socket (used as the key in hostEntry.clients).
+let nextClientSeq = 1;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -147,43 +153,55 @@ async function attachClient(hostEntry, clientState, dbComputer) {
     }
   }
 
-  clientState.computerId = computerId;
-  hostEntry.client = clientState;
-  log(`client-connected: '${clientState.email}' → '${computerId}' (${hostEntry.name})`);
+  // Already attached (e.g. double 'connect')? Just confirm, don't duplicate.
+  if (hostEntry.clients.has(clientState.cid)) {
+    send(clientState.ws, { type: 'connected', computerId, name: hostEntry.name });
+    return;
+  }
 
-  // Access log: a row per session.
+  clientState.computerId = computerId;
+  hostEntry.clients.set(clientState.cid, clientState);
+  const nClients = hostEntry.clients.size;
+  log(`client-connected: '${clientState.email}' → '${computerId}' (${hostEntry.name}) [${nClients} attached]`);
+
+  // Access log: one row per client session.
   clientState.sessionId = await openSession(clientState.userId, computerId);
 
   send(clientState.ws, { type: 'connected', computerId, name: hostEntry.name });
-  send(hostEntry.ws, { type: 'client_connected' });
-  resetIdleTimer(hostEntry);
+  // The host only tracks "any client?" — notify it on the first attach.
+  if (nClients === 1) send(hostEntry.ws, { type: 'client_connected' });
+  resetIdleTimer(hostEntry, clientState);
 }
 
-// Cleanly detach the current client from a host entry: end the DB session,
-// stop the idle timer, notify the host.
-async function detachClient(hostEntry, reason) {
-  const client = hostEntry.client;
+// Cleanly detach one client from a host entry: end its DB session row,
+// stop its idle timer, and notify the host only when the last client leaves.
+async function detachClient(hostEntry, clientState, reason) {
+  const client = hostEntry.clients.get(clientState.cid);
   if (!client) return;
   if (client.idleTimer) clearTimeout(client.idleTimer);
   await closeSession(client.sessionId);
   client.sessionId = null;
-  hostEntry.client = null;
-  log(`client-disconnected: '${client.email}' left '${hostEntry.computerId}' (${reason})`);
-  send(hostEntry.ws, { type: 'client_disconnected' });
+  hostEntry.clients.delete(client.cid);
+  if (hostEntry.fileRequester === client) hostEntry.fileRequester = null;
+  const nLeft = hostEntry.clients.size;
+  log(`client-disconnected: '${client.email}' left '${hostEntry.computerId}' (${reason}) [${nLeft} left]`);
+  // Only the last detach tells the host to stop streaming.
+  if (nLeft === 0) send(hostEntry.ws, { type: 'client_disconnected' });
 }
 
-// Clear + restart the idle timer for a session. Fires when the client sends
+// Clear + restart one client's idle timer. Fires when that client sends
 // no input events for IDLE_TIMEOUT_MS.
-function resetIdleTimer(hostEntry) {
-  const client = hostEntry && hostEntry.client;
+function resetIdleTimer(hostEntry, clientState) {
+  const client = hostEntry.clients.get(clientState.cid);
   if (!client) return;
   if (client.idleTimer) clearTimeout(client.idleTimer);
-  client.idleTimer = setTimeout(() => {
-    const { computerId, email } = client;
-    log(`idle-timeout: disconnecting '${email}' from '${computerId}' (30m no input)`);
+  client.idleTimer = setTimeout(async () => {
+    log(`idle-timeout: disconnecting '${client.email}' from '${client.computerId}' (30m no input)`);
     send(client.ws, { type: 'idle_timeout' });
-    send(hostEntry.ws, { type: 'idle_timeout' });
-    detachClient(hostEntry, 'idle timeout');
+    // detachClient notifies the host only when the last client leaves.
+    await detachClient(hostEntry, client, 'idle timeout').catch((e) => {
+      log('idle-timeout detach error:', e.message);
+    });
   }, IDLE_TIMEOUT_MS);
   // Don't keep the process alive for this timer alone.
   if (client.idleTimer.unref) client.idleTimer.unref();
@@ -250,7 +268,7 @@ async function handleHostMessage(hostEntry, msg) {
     if (prev && prev !== hostEntry && prev.ws.readyState === prev.ws.OPEN) {
       log(`host-register: replacing stale registration for '${computerId}'`);
       try { prev.ws.close(4000, 'replaced by new registration'); } catch { /* ignore */ }
-      if (prev.client) await detachClient(prev, 'host re-registered');
+      for (const [, c] of [...prev.clients]) await detachClient(prev, c, 'host re-registered');
     }
     hostEntry.computerId = computerId;
     hostEntry.name = name;
@@ -268,14 +286,17 @@ async function handleHostMessage(hostEntry, msg) {
   }
 
   switch (msg.type) {
-    // Screen frame → forward to the paired client.
+    // Screen frame → broadcast to every attached client.
     case 'frame':
-      if (hostEntry.client && typeof msg.data === 'string') {
-        send(hostEntry.client.ws, { type: 'frame', data: msg.data });
+      if (typeof msg.data === 'string') {
+        for (const [, c] of hostEntry.clients) {
+          send(c.ws, { type: 'frame', data: msg.data });
+        }
       }
       break;
 
-    // File transfer replies → forward to the paired client.
+    // File transfer replies → route to the requesting client when known,
+    // otherwise broadcast to everyone attached.
     case 'file_ack':
     case 'file_error':
     case 'file_done':
@@ -284,13 +305,20 @@ async function handleHostMessage(hostEntry, msg) {
     case 'dl_chunk':
     case 'dl_end':
     case 'file_deleted':
-    case 'file_renamed':
-      if (hostEntry.client) {
-        // Chunk payloads must be strings, like frames.
-        if (msg.type === 'dl_chunk' && typeof msg.data !== 'string') break;
-        send(hostEntry.client.ws, msg);
+    case 'file_renamed': {
+      // Chunk payloads must be strings, like frames.
+      if (msg.type === 'dl_chunk' && typeof msg.data !== 'string') break;
+      const req = hostEntry.fileRequester;
+      const targets = (req && hostEntry.clients.has(req.cid))
+        ? [req]
+        : [...hostEntry.clients.values()];
+      for (const c of targets) send(c.ws, msg);
+      // The operation is over once the final reply goes out.
+      if (msg.type === 'file_done' || msg.type === 'dl_end' || msg.type === 'file_error') {
+        hostEntry.fileRequester = null;
       }
       break;
+    }
 
     // Host says it's going away on purpose.
     case 'bye':
@@ -304,19 +332,22 @@ async function handleHostMessage(hostEntry, msg) {
   }
 }
 
-// Remove a host registration; tell its client the host went offline.
+// Remove a host registration; tell all its clients the host went offline.
 async function cleanupHost(hostEntry) {
   if (hostEntry.computerId && hosts.get(hostEntry.computerId) === hostEntry) {
     hosts.delete(hostEntry.computerId);
   }
-  if (hostEntry.client) {
-    const client = hostEntry.client;
+  const clients = [...hostEntry.clients.values()];
+  hostEntry.clients.clear();
+  hostEntry.fileRequester = null;
+  for (const client of clients) {
     if (client.idleTimer) clearTimeout(client.idleTimer);
     await closeSession(client.sessionId);
     send(client.ws, { type: 'host_offline' });
     try { client.ws.close(4001, 'host offline'); } catch { /* ignore */ }
-    hostEntry.client = null;
-    log(`host-offline: '${hostEntry.computerId || 'unknown'}' disconnected; client '${client.email}' notified`);
+  }
+  if (clients.length) {
+    log(`host-offline: '${hostEntry.computerId || 'unknown'}' disconnected; ${clients.length} client(s) notified`);
   } else if (hostEntry.computerId) {
     log(`host-offline: '${hostEntry.computerId}' disconnected (no client attached)`);
   }
@@ -476,16 +507,12 @@ async function handleClientMessage(clientState, msg) {
     }
 
     // Pair with a host: { type:'connect', computerId }
+    // Multiple clients may attach to the same computer at once.
     case 'connect': {
       const computerId = normComputerId(msg.computerId);
       const hostEntry = hosts.get(computerId);
       if (!hostEntry || hostEntry.ws.readyState !== hostEntry.ws.OPEN) {
         send(ws, { type: 'status', computerId, online: false });
-        return;
-      }
-      if (hostEntry.client) {
-        log(`client-connect REJECTED (busy): '${clientState.email}' → '${computerId}'`);
-        send(ws, { type: 'busy' });
         return;
       }
       await attachClient(hostEntry, clientState, hostEntry.db);
@@ -495,12 +522,12 @@ async function handleClientMessage(clientState, msg) {
     // Input events → relay to host, and count as activity for idle timeout.
     case 'input': {
       const hostEntry = clientState.computerId ? hosts.get(clientState.computerId) : null;
-      if (!hostEntry || hostEntry.client !== clientState) {
+      if (!hostEntry || !hostEntry.clients.has(clientState.cid)) {
         send(ws, { type: 'error', message: 'not connected to a host' });
         return;
       }
       clientState.lastInputAt = Date.now();
-      resetIdleTimer(hostEntry); // any input resets the 30-minute clock
+      resetIdleTimer(hostEntry, clientState); // any input resets the 30-minute clock
       // Forward the whole input payload (action: move|click|key|scroll, ...).
       send(hostEntry.ws, msg);
       break;
@@ -515,7 +542,7 @@ async function handleClientMessage(clientState, msg) {
     case 'file_delete':
     case 'file_rename': {
       const hostEntry = clientState.computerId ? hosts.get(clientState.computerId) : null;
-      if (!hostEntry || hostEntry.client !== clientState) {
+      if (!hostEntry || !hostEntry.clients.has(clientState.cid)) {
         send(ws, { type: 'error', message: 'not connected to a host' });
         return;
       }
@@ -524,8 +551,13 @@ async function handleClientMessage(clientState, msg) {
         send(ws, { type: 'error', message: 'bad chunk payload' });
         return;
       }
+      // Remember who asked so the host's reply routes back to them.
+      // (Two clients doing file ops at once: last requester wins.)
+      if (msg.type === 'file_start' || msg.type === 'file_get_list' || msg.type === 'file_dl') {
+        hostEntry.fileRequester = clientState;
+      }
       clientState.lastInputAt = Date.now();
-      resetIdleTimer(hostEntry); // transfers count as session activity
+      resetIdleTimer(hostEntry, clientState); // transfers count as session activity
       send(hostEntry.ws, msg);
       break;
     }
@@ -533,8 +565,8 @@ async function handleClientMessage(clientState, msg) {
     // Client ends the session on purpose.
     case 'disconnect': {
       const hostEntry = clientState.computerId ? hosts.get(clientState.computerId) : null;
-      if (hostEntry && hostEntry.client === clientState) {
-        await detachClient(hostEntry, 'client requested disconnect');
+      if (hostEntry && hostEntry.clients.has(clientState.cid)) {
+        await detachClient(hostEntry, clientState, 'client requested disconnect');
       }
       clientState.computerId = null;
       send(ws, { type: 'disconnected' });
@@ -663,8 +695,10 @@ wss.on('connection', (ws) => {
   // meaningful message decides. Track both possibilities, use one.
   const peer = {
     kind: null, // 'host' | 'client'
-    hostEntry: { ws, computerId: null, name: null, db: null, client: null },
+    hostEntry: { ws, computerId: null, name: null, db: null,
+                 clients: new Map(), fileRequester: null },
     clientState: {
+      cid: 'c' + (nextClientSeq++),
       ws, authed: false, userId: null, email: null, pending2fa: null,
       computerId: null, sessionId: null, idleTimer: null, lastInputAt: null,
     },
@@ -713,8 +747,8 @@ wss.on('connection', (ws) => {
     } else if (peer.kind === 'client') {
       const st = peer.clientState;
       const hostEntry = st.computerId ? hosts.get(st.computerId) : null;
-      if (hostEntry && hostEntry.client === st) {
-        await detachClient(hostEntry, 'socket closed');
+      if (hostEntry && hostEntry.clients.has(st.cid)) {
+        await detachClient(hostEntry, st, 'socket closed');
       } else if (st.email) {
         log(`client-disconnected: '${st.email}' (socket closed, no active session)`);
       }
@@ -738,8 +772,8 @@ function shutdown() {
   log('shutting down...');
   for (const [, hostEntry] of hosts) {
     try { hostEntry.ws.close(4002, 'server shutting down'); } catch { /* ignore */ }
-    if (hostEntry.client) {
-      try { hostEntry.client.ws.close(4002, 'server shutting down'); } catch { /* ignore */ }
+    for (const [, c] of hostEntry.clients) {
+      try { c.ws.close(4002, 'server shutting down'); } catch { /* ignore */ }
     }
   }
   server.close(() => process.exit(0));
