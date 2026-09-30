@@ -49,7 +49,10 @@
   var LS_USER = 'ecfc_rd_user';
 
   function serverURL() {
-    return localStorage.getItem(LS_SERVER) || DEFAULT_SERVER_URL;
+    // Server field is locked in the UI — always use the built-in URL so a
+    // mistyped address can never break the connection.
+    try { localStorage.removeItem(LS_SERVER); } catch (e) {}
+    return DEFAULT_SERVER_URL;
   }
 
   function loadComputers() {
