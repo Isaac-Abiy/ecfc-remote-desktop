@@ -85,7 +85,8 @@
     tfaEnabled: false,       // whether the signed-in account has 2FA on
     computers: loadComputers(),   // [{ id, name }]
     statuses: {},                // computerId -> true/false/null(unknown)
-    session: null,               // { computerId }
+    viewOnlyHosts: {},           // computerId -> true when the host is view-only
+    session: null,               // { computerId, viewOnly }
     frames: 0,
     fpsTimer: null,
     pingTimer: null,
@@ -136,6 +137,12 @@
       fileList = $('file-list'), filePicker = $('file-picker'),
       transferProgress = $('transfer-progress'), transferBar = $('transfer-bar'),
       transferLabel = $('transfer-label'),
+      viewonlyBadge = $('viewonly-badge'),
+      hostScreen = $('screen-host'), sharePcBtn = $('share-pc-btn'),
+      hostBack = $('host-back'), hostNameInput = $('host-name'), hostIdInput = $('host-id'),
+      hostStatus = $('host-status'), hostStatusText = $('host-status-text'),
+      hostError = $('host-error'), hostStart = $('host-start'), hostStop = $('host-stop'),
+      hostViewers = $('host-viewers'), hostVideo = $('host-video'), hostCanvas = $('host-canvas'),
       toastEl = $('toast');
 
   /* ---------------- Screens & toast ---------------- */
@@ -145,6 +152,7 @@
     tfaScreen.classList.toggle('hidden', name !== '2fa');
     settingsScreen.classList.toggle('hidden', name !== 'settings');
     homeScreen.classList.toggle('hidden', name !== 'home');
+    hostScreen.classList.toggle('hidden', name !== 'host');
     sessionScreen.classList.toggle('hidden', name !== 'session');
   }
 
@@ -337,13 +345,14 @@
       case 'status':
         if (msg.computerId) {
           state.statuses[msg.computerId] = !!msg.online;
+          state.viewOnlyHosts[msg.computerId] = !!msg.viewOnly;
           renderComputers();
         }
         break;
 
       case 'connected':
         state.connecting = false;
-        startSession(msg.computerId);
+        startSession(msg.computerId, !!msg.viewOnly);
         break;
 
       case 'frame':
@@ -697,6 +706,7 @@
       var online = state.statuses[pc.id]; // true / false / undefined
       var dotCls = online === true ? 'online' : (online === false ? 'offline' : '');
       var statusTxt = online === true ? 'Online' : (online === false ? 'Offline' : 'Checking…');
+      if (online === true && state.viewOnlyHosts[pc.id]) statusTxt += ' · 👁️ view-only';
 
       card.innerHTML =
         '<div class="pc-icon">🖥️</div>' +
@@ -777,17 +787,19 @@
   }
 
   /* ---------------- Session ---------------- */
-  function startSession(computerId) {
-    state.session = { computerId: computerId };
+  function startSession(computerId, viewOnly) {
+    state.session = { computerId: computerId, viewOnly: !!viewOnly };
     state.frames = 0;
-    sessionTitle.textContent = computerId;
+    sessionTitle.textContent = computerId + (state.session.viewOnly ? ' 👁️' : '');
     statFps.textContent = '0 FPS';
     statPing.textContent = '— ms';
     sessionMsg.classList.add('hidden');
     frameImg.removeAttribute('src');
     setFitMode(true);
-    // Keyboard capture: on by default for desktop, off for touch (toggle summons soft keyboard)
-    setKbCapture(!IS_TOUCH);
+    applyViewOnlyUI();
+    // Keyboard capture: on by default for desktop, off for touch (toggle summons soft keyboard).
+    // Never capture keys for a view-only session — there's nothing to control.
+    setKbCapture(!IS_TOUCH && !state.session.viewOnly);
     showScreen('session');
     setTimeout(function () { viewport.focus({ preventScroll: true }); }, 50);
 
@@ -804,6 +816,17 @@
     }, 5000);
   }
 
+  // View-only sessions: hide every control, show the badge instead.
+  // (sendInput + handleKey also refuse input when session.viewOnly is set.)
+  function applyViewOnlyUI() {
+    var vo = !!(state.session && state.session.viewOnly);
+    kbBtn.classList.toggle('hidden', vo);
+    typeBtn.classList.toggle('hidden', vo);
+    uploadBtn.classList.toggle('hidden', vo);
+    filesBtn.classList.toggle('hidden', vo);
+    viewonlyBadge.classList.toggle('hidden', !vo);
+  }
+
   function endSession(message) {
     if (!state.session) return;
     send({ type: 'disconnect' });
@@ -812,6 +835,12 @@
     clearInterval(state.pingTimer); state.pingTimer = null;
     if (state.pongWatchdog) { clearTimeout(state.pongWatchdog); state.pongWatchdog = null; }
     try { keyCatcher.blur(); } catch (e) {}
+    // Restore the control UI in case this was a view-only session.
+    kbBtn.classList.remove('hidden');
+    typeBtn.classList.remove('hidden');
+    uploadBtn.classList.remove('hidden');
+    filesBtn.classList.remove('hidden');
+    viewonlyBadge.classList.add('hidden');
     // Close the new session UI too.
     typeDialog.classList.add('hidden');
     typeText.value = '';
@@ -843,7 +872,7 @@
   }
 
   function sendInput(obj) {
-    if (!state.session) return false;
+    if (!state.session || state.session.viewOnly) return false; // view-only: no input
     obj.type = 'input';
     return send(obj);
   }
@@ -1002,7 +1031,7 @@
   var PREVENT_KEYS = { Tab: true, ArrowUp: true, ArrowDown: true, ArrowLeft: true, ArrowRight: true, ' ': true };
 
   function handleKey(e, down) {
-    if (!state.session || !state.kbCapture) return;
+    if (!state.session || !state.kbCapture || state.session.viewOnly) return;
     // Typing in the Type-text dialog must not also leak keystrokes to the PC.
     var t = e.target;
     if (t && t !== keyCatcher && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
@@ -1258,6 +1287,245 @@
     reader.onerror = function () { toast('Could not read that file.'); };
     reader.readAsArrayBuffer(f);
   }
+
+  /* ---------------- Browser host mode ("Share this PC") ----------------
+     No installs: this tab becomes the host. getDisplayMedia captures the
+     screen, a canvas loop JPEG-encodes frames, and a dedicated WebSocket
+     (separate from the control socket) registers + streams them through
+     the relay exactly like the Python agent. View-only by design:
+     browsers can share pixels but cannot move the OS mouse/keyboard. */
+  var LS_HOST_ID = 'ecfc_rd_host_id';
+  var LS_HOST_SECRET = 'ecfc_rd_host_secret';
+
+  var host = {
+    ws: null,
+    stream: null,
+    timer: null,
+    sharing: false,
+    viewers: 0,
+    computerId: null,
+    secret: null,
+  };
+
+  function hostRandomId() {
+    var chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // skip look-alikes 0/O/1/I
+    var s = '';
+    for (var i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)];
+    return s;
+  }
+
+  function hostRandomSecret() {
+    var chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    var s = '';
+    try {
+      var rnd = new Uint8Array(48);
+      crypto.getRandomValues(rnd);
+      for (var i = 0; i < rnd.length; i++) s += chars[rnd[i] % chars.length];
+    } catch (e) {
+      for (var j = 0; j < 48; j++) s += chars[Math.floor(Math.random() * chars.length)];
+    }
+    return s;
+  }
+
+  // Stable identity across sessions: the Computer ID never changes unless
+  // browser storage is cleared.
+  function hostIdentity() {
+    var id = null, secret = null;
+    try {
+      id = localStorage.getItem(LS_HOST_ID);
+      secret = localStorage.getItem(LS_HOST_SECRET);
+    } catch (e) {}
+    if (!/^[A-Z0-9]{6}$/.test(id || '')) {
+      id = hostRandomId();
+      try { localStorage.setItem(LS_HOST_ID, id); } catch (e) {}
+    }
+    if (!secret || secret.length < 16) {
+      secret = hostRandomSecret();
+      try { localStorage.setItem(LS_HOST_SECRET, secret); } catch (e) {}
+    }
+    host.computerId = id;
+    host.secret = secret;
+    return { id: id, secret: secret };
+  }
+
+  function hostShowError(msg) {
+    hostError.textContent = msg;
+    hostError.classList.remove('hidden');
+  }
+  function hostClearError() { hostError.classList.add('hidden'); }
+
+  function hostRenderStatus() {
+    if (host.sharing) {
+      hostStatus.classList.remove('idle');
+      hostStatus.classList.add('live');
+      hostStatusText.textContent = '🔴 LIVE — sharing as ' + host.computerId;
+      hostViewers.textContent = host.viewers === 1 ? '1 viewer watching' : host.viewers + ' viewers watching';
+    } else {
+      hostStatus.classList.add('idle');
+      hostStatus.classList.remove('live');
+      hostStatusText.textContent = 'Not sharing';
+      hostViewers.textContent = '';
+    }
+    hostStart.classList.toggle('hidden', host.sharing);
+    hostStop.classList.toggle('hidden', !host.sharing);
+  }
+
+  function hostSend(obj) {
+    if (host.ws && host.ws.readyState === WebSocket.OPEN) {
+      host.ws.send(JSON.stringify(obj));
+      return true;
+    }
+    return false;
+  }
+
+  sharePcBtn.addEventListener('click', function () {
+    hostClearError();
+    var ident = hostIdentity();
+    hostIdInput.value = ident.id;
+    if (!hostNameInput.value) hostNameInput.value = 'Shared PC';
+    hostRenderStatus();
+    showScreen('host');
+  });
+
+  hostBack.addEventListener('click', function () {
+    // Leaving the screen doesn't stop an active share — use Stop for that.
+    showScreen('home');
+  });
+
+  hostStart.addEventListener('click', function () {
+    hostClearError();
+    if (host.sharing) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      hostShowError("Screen sharing isn't supported in this browser — use Chrome or Edge on a computer.");
+      return;
+    }
+    hostIdentity();
+    hostIdInput.value = host.computerId;
+    hostStart.disabled = true;
+    hostStart.textContent = 'Starting…';
+
+    var ws;
+    try { ws = new WebSocket(serverURL()); }
+    catch (e) {
+      hostStart.disabled = false;
+      hostStart.textContent = '▶ Start sharing';
+      hostShowError('Could not reach the server.');
+      return;
+    }
+    host.ws = ws;
+    ws.onopen = function () {
+      // Same register shape the Python host uses, plus the view-only flag.
+      hostSend({
+        type: 'register',
+        computerId: host.computerId,
+        name: (hostNameInput.value.trim() || 'Shared PC').slice(0, 40),
+        pairingSecret: host.secret,
+        viewOnly: true,
+      });
+      // Now ask for the screen.
+      navigator.mediaDevices.getDisplayMedia({ video: true }).then(function (stream) {
+        host.stream = stream;
+        hostVideo.srcObject = stream;
+        var p = hostVideo.play();
+        if (p && p.catch) p.catch(function () {});
+        // User clicked "Stop sharing" in the browser chrome → clean up too.
+        var track = stream.getVideoTracks()[0];
+        if (track) track.addEventListener('ended', function () { stopSharing('Screen sharing was stopped.'); });
+      }).catch(function (err) {
+        var why = (err && err.name === 'NotAllowedError') ? ' — please allow it in the picker.' : '';
+        hostShowError('Could not capture the screen' + why + ' Try again.');
+        stopSharing(); // silent: unregisters the half-started share
+      });
+    };
+    ws.onmessage = function (ev) {
+      var msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      handleHostMessage(msg);
+    };
+    ws.onclose = function () {
+      host.ws = null;
+      if (host.sharing) stopSharing('Connection to the server was lost.');
+      else { hostStart.disabled = false; hostStart.textContent = '▶ Start sharing'; }
+    };
+    ws.onerror = function () { /* onclose follows with details */ };
+  });
+
+  function handleHostMessage(msg) {
+    switch (msg.type) {
+      case 'registered':
+        host.sharing = true;
+        host.viewers = 0;
+        hostRenderStatus();
+        hostStart.disabled = false;
+        hostStart.textContent = '▶ Start sharing';
+        // Capture loop (~8 FPS is plenty for view-only).
+        if (host.timer) clearInterval(host.timer);
+        host.timer = setInterval(hostCaptureFrame, 120);
+        toast('🖥️ Sharing live as ' + msg.computerId);
+        break;
+      case 'client_connected':
+        host.viewers++;
+        hostRenderStatus();
+        break;
+      case 'client_disconnected':
+        host.viewers = Math.max(0, host.viewers - 1);
+        hostRenderStatus();
+        break;
+      case 'error':
+        hostShowError(msg.message || 'The server refused the share.');
+        stopSharing();
+        break;
+      // View-only: the server may relay viewer input / file messages —
+      // a browser tab cannot act on them, so ignore gracefully.
+      case 'input':
+        console.log('[host] view-only: ignoring input from a viewer');
+        break;
+      case 'file_start': case 'file_chunk': case 'file_end':
+      case 'file_get_list': case 'file_dl': case 'file_delete': case 'file_rename':
+        console.log('[host] view-only: ignoring file message (' + msg.type + ')');
+        break;
+      default:
+        break;
+    }
+  }
+
+  function hostCaptureFrame() {
+    if (!host.sharing || !hostVideo.videoWidth) return;
+    try {
+      var scale = Math.min(1, 1280 / hostVideo.videoWidth);
+      var w = Math.max(2, Math.round(hostVideo.videoWidth * scale));
+      var h = Math.max(2, Math.round(hostVideo.videoHeight * scale));
+      if (hostCanvas.width !== w || hostCanvas.height !== h) {
+        hostCanvas.width = w;
+        hostCanvas.height = h;
+      }
+      var ctx = hostCanvas.getContext('2d');
+      ctx.drawImage(hostVideo, 0, 0, w, h);
+      var b64 = hostCanvas.toDataURL('image/jpeg', 0.65).split(',')[1] || '';
+      if (b64) hostSend({ type: 'frame', data: b64 });
+    } catch (e) { /* one bad frame must never kill the share */ }
+  }
+
+  function stopSharing(notice) {
+    if (host.timer) { clearInterval(host.timer); host.timer = null; }
+    if (host.stream) {
+      try { host.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+      host.stream = null;
+    }
+    try { hostVideo.pause(); hostVideo.removeAttribute('src'); hostVideo.srcObject = null; } catch (e) {}
+    if (host.ws && host.ws.readyState === WebSocket.OPEN) {
+      try { host.ws.send(JSON.stringify({ type: 'bye' })); } catch (e) {}
+    }
+    if (host.ws) { try { host.ws.close(); } catch (e) {} host.ws = null; }
+    host.sharing = false;
+    host.viewers = 0;
+    hostRenderStatus();
+    hostStart.disabled = false;
+    hostStart.textContent = '▶ Start sharing';
+    if (notice) toast(notice, 4000);
+  }
+
+  hostStop.addEventListener('click', function () { stopSharing('Stopped sharing.'); });
 
   /* ---------------- Fit-to-screen toggle ---------------- */
   function setFitMode(fit) {

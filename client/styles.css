@@ -390,6 +390,38 @@ input[readonly]:focus { border-color: var(--border); box-shadow: none; }
   padding: 0 8px;
 }
 
+/* ---------- Browser host mode ("Share this PC") ---------- */
+.host-status {
+  display: flex; align-items: center; gap: 10px;
+  font-weight: 700; font-size: 1.05rem;
+  margin: 6px 0 14px;
+}
+.host-status .live-dot {
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--muted); flex-shrink: 0;
+}
+.host-status.live .live-dot {
+  background: var(--red);
+  box-shadow: 0 0 10px var(--red);
+  animation: live-pulse 1.4s infinite;
+}
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* ---------- View-only badge (session toolbar) ---------- */
+.viewonly-badge {
+  background: rgba(99,102,241,.18);
+  border: 1px solid var(--accent);
+  color: var(--accent2);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 /* ---------- Toast ---------- */
 .toast {
   position: fixed;

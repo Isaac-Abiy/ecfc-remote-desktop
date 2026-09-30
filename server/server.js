@@ -62,7 +62,7 @@ function log(...args) {
 // In-memory state
 //
 // hosts:   Map computerId -> hostEntry
-//            { ws, computerId, name, db: {id, owner_id} | null,
+//            { ws, computerId, name, viewOnly, db: {id, owner_id} | null,
 //              clients: Map<cid, clientState>, fileRequester: clientState | null }
 //
 // A clientState: { cid, ws, authed, userId, email, computerId, sessionId,
@@ -155,7 +155,7 @@ async function attachClient(hostEntry, clientState, dbComputer) {
 
   // Already attached (e.g. double 'connect')? Just confirm, don't duplicate.
   if (hostEntry.clients.has(clientState.cid)) {
-    send(clientState.ws, { type: 'connected', computerId, name: hostEntry.name });
+    send(clientState.ws, { type: 'connected', computerId, name: hostEntry.name, viewOnly: !!hostEntry.viewOnly });
     return;
   }
 
@@ -167,7 +167,7 @@ async function attachClient(hostEntry, clientState, dbComputer) {
   // Access log: one row per client session.
   clientState.sessionId = await openSession(clientState.userId, computerId);
 
-  send(clientState.ws, { type: 'connected', computerId, name: hostEntry.name });
+  send(clientState.ws, { type: 'connected', computerId, name: hostEntry.name, viewOnly: !!hostEntry.viewOnly });
   // The host only tracks "any client?" — notify it on the first attach.
   if (nClients === 1) send(hostEntry.ws, { type: 'client_connected' });
   resetIdleTimer(hostEntry, clientState);
@@ -273,8 +273,9 @@ async function handleHostMessage(hostEntry, msg) {
     hostEntry.computerId = computerId;
     hostEntry.name = name;
     hostEntry.db = dbComputer;
+    hostEntry.viewOnly = msg.viewOnly === true; // browser "Share this PC" hosts
     hosts.set(computerId, hostEntry);
-    log(`host-registered: '${name}' as '${computerId}'`);
+    log(`host-registered: '${name}' as '${computerId}'${hostEntry.viewOnly ? ' [view-only browser host]' : ''}`);
     send(ws, { type: 'registered', computerId });
     return;
   }
@@ -353,6 +354,7 @@ async function cleanupHost(hostEntry) {
   }
   hostEntry.computerId = null;
   hostEntry.db = null;
+  hostEntry.viewOnly = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -502,7 +504,7 @@ async function handleClientMessage(clientState, msg) {
       const computerId = normComputerId(msg.computerId);
       const hostEntry = hosts.get(computerId);
       const online = !!hostEntry && hostEntry.ws.readyState === hostEntry.ws.OPEN;
-      send(ws, { type: 'status', computerId, online });
+      send(ws, { type: 'status', computerId, online, viewOnly: online && !!hostEntry.viewOnly });
       break;
     }
 
@@ -695,7 +697,7 @@ wss.on('connection', (ws) => {
   // meaningful message decides. Track both possibilities, use one.
   const peer = {
     kind: null, // 'host' | 'client'
-    hostEntry: { ws, computerId: null, name: null, db: null,
+    hostEntry: { ws, computerId: null, name: null, db: null, viewOnly: false,
                  clients: new Map(), fileRequester: null },
     clientState: {
       cid: 'c' + (nextClientSeq++),

@@ -156,6 +156,12 @@
     </div>
     <div id="computer-list" class="computer-list"></div>
     <p id="empty-hint" class="muted center hidden">No computers yet — add one above to get started.</p>
+
+    <div class="card">
+      <h2>🖥️ Share this PC</h2>
+      <p class="muted small">No installs — share this computer's screen straight from the browser. <b>View-only:</b> viewers can watch, but can't control it.</p>
+      <button id="share-pc-btn" class="btn primary btn-block">Share this PC</button>
+    </div>
   </main>
 </section>
 
@@ -209,11 +215,52 @@
   </main>
 </section>
 
+<!-- ============ BROWSER HOST ("Share this PC") ============ -->
+<section id="screen-host" class="screen hidden">
+  <header class="topbar">
+    <button id="host-back" class="btn ghost small">← Back</button>
+    <div class="brand"><span>🖥️ Share this PC</span></div>
+  </header>
+
+  <main class="home-main">
+    <div class="card">
+      <h2>Share this screen</h2>
+      <p class="muted small">No installs needed. <b>View-only mode</b> — browsers can share the screen but can't control the PC.</p>
+
+      <label class="field">
+        <span>Computer name</span>
+        <input id="host-name" type="text" maxlength="40" placeholder="Shared PC" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="field">
+        <span>Computer ID <span class="muted">— viewers add this ID on their home screen</span></span>
+        <input id="host-id" type="text" readonly tabindex="-1" class="code-input" placeholder="------">
+      </label>
+
+      <div id="host-status" class="host-status idle">
+        <span class="live-dot"></span><span id="host-status-text">Not sharing</span>
+      </div>
+      <div id="host-error" class="error hidden"></div>
+
+      <div class="row-btns">
+        <button id="host-start" class="btn primary">▶ Start sharing</button>
+        <button id="host-stop" class="btn danger hidden">⏹ Stop sharing</button>
+      </div>
+      <p id="host-viewers" class="muted small center"></p>
+      <p class="muted small">Keep this tab open while sharing. In the browser picker, choose <b>“Entire screen”</b> for the full desktop.</p>
+    </div>
+  </main>
+
+  <!-- Hidden capture elements -->
+  <video id="host-video" class="hidden" muted playsinline></video>
+  <canvas id="host-canvas" class="hidden"></canvas>
+</section>
+
 <!-- ============ SESSION ============ -->
 <section id="screen-session" class="screen hidden">
   <div id="toolbar" class="toolbar">
     <button id="disc-btn" class="btn danger small" title="Disconnect">✕</button>
     <span id="session-title" class="session-title">—</span>
+    <span id="viewonly-badge" class="viewonly-badge hidden">👁️ View-only</span>
     <span class="dot-sep"></span>
     <span class="stats"><span id="stat-fps">0 FPS</span> · <span id="stat-ping">— ms</span></span>
     <span class="spacer"></span>
