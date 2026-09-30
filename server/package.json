@@ -1,0 +1,1 @@
+{"dependencies":{"ws":"^8.18.0"},"description":"WebSocket signaling server for ECFC Remote Desktop MVP — pairs host agents with clients and relays screen/input messages.","license":"UNLICENSED","main":"server.js","name":"ecfc-remote-desktop-signaling","scripts":{"start":"node server.js"},"version":"0.1.0"}
