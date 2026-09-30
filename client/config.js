@@ -10,4 +10,4 @@
  * and whatever you type there is saved in the browser (localStorage) and used
  * instead of this value.
  */
-const SERVER_URL = 'ws://localhost:8080';
+const SERVER_URL = 'wss://ecfc-remote-desktop.onrender.com';
