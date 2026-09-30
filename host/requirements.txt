@@ -1,0 +1,5 @@
+# ECFC Remote Desktop - host agent dependencies (Windows)
+websockets>=12.0
+mss>=9.0.0
+pynput>=1.7.6
+Pillow>=10.0.0

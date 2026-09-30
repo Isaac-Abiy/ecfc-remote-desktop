@@ -1,33 +1,55 @@
 // ============================================================================
-// ECFC Remote Desktop — Signaling Server (MVP)
+// ECFC Remote Desktop — Signaling Server
 // ----------------------------------------------------------------------------
 // A Node.js WebSocket server that pairs a Windows host agent with a remote
 // client (browser). It never interprets the screen/input payloads — it just
 // relays JSON messages between the one host and its one active client.
 //
+// Accounts live in Supabase (rd_users): email + bcrypt password hash, with
+// optional TOTP two-factor auth (Google Authenticator style). Registered PCs
+// live in rd_computers with a per-computer pairing secret. Every remote
+// session is written to rd_sessions (the access log).
+//
 // Run:  npm install && npm start
-// Env:  PORT (default 8080), PAIRING_SECRET (default 'ecfc-pair-123')
+// Env:  PORT (default 8080)
+//       SUPABASE_URL, SUPABASE_SERVICE_KEY  (required for auth/pairing)
 // ============================================================================
 
 'use strict';
 
 const http = require('http');
 const { WebSocketServer } = require('ws');
+const bcrypt = require('bcryptjs');
+const { authenticator } = require('otplib');
+const { createClient } = require('@supabase/supabase-js');
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 const PORT = parseInt(process.env.PORT, 10) || 8080;
-const PAIRING_SECRET = process.env.PAIRING_SECRET || 'ecfc-pair-123';
-
-// MVP auth: hardcoded users. (Replace with a real DB + password hashing later.)
-const USERS = { isaac: 'password123' };
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
 
 // A session dies after this long with no input event from the client.
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
+// Allow one step of clock skew on TOTP codes (30s before/after).
+authenticator.options = { window: 1 };
+
 // ---------------------------------------------------------------------------
-// Tiny access log: timestamped console lines. This is the MVP audit trail.
+// Supabase (service-role key: bypasses RLS; never expose it to clients)
+// ---------------------------------------------------------------------------
+let supabase = null;
+const dbReady = Boolean(SUPABASE_URL && SUPABASE_SERVICE_KEY);
+if (dbReady) {
+  supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+} else {
+  console.error('[FATAL] SUPABASE_URL and SUPABASE_SERVICE_KEY are not both set.');
+  console.error('        Auth, pairing and the access log are DISABLED until they are.');
+}
+
+// ---------------------------------------------------------------------------
+// Tiny access log: timestamped console lines (plus rd_sessions in Supabase).
 // ---------------------------------------------------------------------------
 function log(...args) {
   const ts = new Date().toISOString();
@@ -37,11 +59,11 @@ function log(...args) {
 // ---------------------------------------------------------------------------
 // In-memory state
 //
-// hosts:   Map computerId -> { ws, name, client: clientState|null }
-//            One host registration per computerId; re-register replaces it.
+// hosts:   Map computerId -> hostEntry
+//            { ws, computerId, name, db: {id, owner_id} | null, client }
 //
-// A clientState: { ws, computerId, username, idleTimer, lastInputAt }
-// A host entry holds a back-pointer to its connected client (max one).
+// A clientState: { ws, authed, userId, email, computerId, sessionId,
+//                  idleTimer, lastInputAt }
 // ---------------------------------------------------------------------------
 const hosts = new Map();
 
@@ -54,34 +76,6 @@ function send(ws, obj) {
   }
 }
 
-// Clear + restart the idle timer for a session. Fires when the client sends
-// no input events for IDLE_TIMEOUT_MS.
-function resetIdleTimer(hostEntry) {
-  const client = hostEntry && hostEntry.client;
-  if (!client) return;
-  if (client.idleTimer) clearTimeout(client.idleTimer);
-  client.idleTimer = setTimeout(() => {
-    const { computerId, username } = client;
-    log(`idle-timeout: disconnecting client '${username}' from '${computerId}' (30m no input)`);
-    send(client.ws, { type: 'idle_timeout' });
-    send(hostEntry.ws, { type: 'idle_timeout' });
-    detachClient(hostEntry, 'idle timeout');
-  }, IDLE_TIMEOUT_MS);
-  // Don't keep the process alive for this timer alone.
-  if (client.idleTimer.unref) client.idleTimer.unref();
-}
-
-// Cleanly detach the current client from a host entry and notify the host.
-function detachClient(hostEntry, reason) {
-  const client = hostEntry.client;
-  if (!client) return;
-  if (client.idleTimer) clearTimeout(client.idleTimer);
-  hostEntry.client = null;
-  log(`client-disconnected: '${client.username}' left '${hostEntry.computerId}' (${reason})`);
-  send(hostEntry.ws, { type: 'client_disconnected' });
-}
-
-// Parse one incoming text frame; returns null on bad JSON.
 function parseJson(text) {
   try {
     const msg = JSON.parse(text);
@@ -91,34 +85,176 @@ function parseJson(text) {
   }
 }
 
+function validEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function normComputerId(v) {
+  return String(v || '').trim().toUpperCase();
+}
+
+// ---------------------------------------------------------------------------
+// Session bookkeeping (Supabase rd_sessions)
+// ---------------------------------------------------------------------------
+async function openSession(userId, computerId) {
+  if (!dbReady) return null;
+  try {
+    const { data, error } = await supabase
+      .from('rd_sessions')
+      .insert({ user_id: userId, computer_id: computerId })
+      .select('id')
+      .single();
+    if (error) throw error;
+    return data.id;
+  } catch (e) {
+    log('db: openSession failed:', e.message);
+    return null;
+  }
+}
+
+async function closeSession(sessionId) {
+  if (!dbReady || !sessionId) return;
+  try {
+    const { error } = await supabase
+      .from('rd_sessions')
+      .update({ ended_at: new Date().toISOString() })
+      .eq('id', sessionId);
+    if (error) throw error;
+  } catch (e) {
+    log('db: closeSession failed:', e.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pairing: attach / detach a client to a host
+// ---------------------------------------------------------------------------
+async function attachClient(hostEntry, clientState, dbComputer) {
+  const { computerId } = hostEntry;
+
+  // First client to reach an unclaimed computer becomes its owner.
+  if (dbComputer && !dbComputer.owner_id) {
+    try {
+      const { error } = await supabase
+        .from('rd_computers')
+        .update({ owner_id: clientState.userId })
+        .eq('id', dbComputer.id);
+      if (error) throw error;
+      dbComputer.owner_id = clientState.userId;
+      hostEntry.db = dbComputer;
+      log(`pairing: computer '${computerId}' claimed by '${clientState.email}'`);
+    } catch (e) {
+      log('db: claim computer failed:', e.message);
+    }
+  }
+
+  clientState.computerId = computerId;
+  hostEntry.client = clientState;
+  log(`client-connected: '${clientState.email}' → '${computerId}' (${hostEntry.name})`);
+
+  // Access log: a row per session.
+  clientState.sessionId = await openSession(clientState.userId, computerId);
+
+  send(clientState.ws, { type: 'connected', computerId, name: hostEntry.name });
+  send(hostEntry.ws, { type: 'client_connected' });
+  resetIdleTimer(hostEntry);
+}
+
+// Cleanly detach the current client from a host entry: end the DB session,
+// stop the idle timer, notify the host.
+async function detachClient(hostEntry, reason) {
+  const client = hostEntry.client;
+  if (!client) return;
+  if (client.idleTimer) clearTimeout(client.idleTimer);
+  await closeSession(client.sessionId);
+  client.sessionId = null;
+  hostEntry.client = null;
+  log(`client-disconnected: '${client.email}' left '${hostEntry.computerId}' (${reason})`);
+  send(hostEntry.ws, { type: 'client_disconnected' });
+}
+
+// Clear + restart the idle timer for a session. Fires when the client sends
+// no input events for IDLE_TIMEOUT_MS.
+function resetIdleTimer(hostEntry) {
+  const client = hostEntry && hostEntry.client;
+  if (!client) return;
+  if (client.idleTimer) clearTimeout(client.idleTimer);
+  client.idleTimer = setTimeout(() => {
+    const { computerId, email } = client;
+    log(`idle-timeout: disconnecting '${email}' from '${computerId}' (30m no input)`);
+    send(client.ws, { type: 'idle_timeout' });
+    send(hostEntry.ws, { type: 'idle_timeout' });
+    detachClient(hostEntry, 'idle timeout');
+  }, IDLE_TIMEOUT_MS);
+  // Don't keep the process alive for this timer alone.
+  if (client.idleTimer.unref) client.idleTimer.unref();
+}
+
 // ---------------------------------------------------------------------------
 // Host message handling
 // ---------------------------------------------------------------------------
-function handleHostMessage(hostEntry, msg) {
+async function handleHostMessage(hostEntry, msg) {
   const ws = hostEntry.ws;
 
-  // Hosts register first: { type:'register', computerId, name, secret }
+  // Hosts register first: { type:'register', computerId, name, pairingSecret }
   if (msg.type === 'register') {
-    const computerId = String(msg.computerId || '').trim().toUpperCase();
+    const computerId = normComputerId(msg.computerId);
     const name = String(msg.name || 'Unnamed PC').slice(0, 80);
+    const pairingSecret = String(msg.pairingSecret || msg.secret || '');
     if (!computerId) {
       send(ws, { type: 'error', message: 'register: computerId is required' });
       return;
     }
-    if (msg.secret !== PAIRING_SECRET) {
-      log(`host-register REJECTED: wrong pairing secret for '${computerId}'`);
-      send(ws, { type: 'error', message: 'register: bad pairing secret' });
+    if (!dbReady) {
+      send(ws, { type: 'error', message: 'register: server database not configured' });
       return;
     }
+    if (!pairingSecret) {
+      send(ws, { type: 'error', message: 'register: pairingSecret is required' });
+      return;
+    }
+
+    // Look the computer up; verify its secret, or create the row on first sight.
+    let dbComputer = null;
+    try {
+      const { data, error } = await supabase
+        .from('rd_computers')
+        .select('id, owner_id, pairing_secret')
+        .eq('computer_id', computerId)
+        .maybeSingle();
+      if (error) throw error;
+      if (data) {
+        if (data.pairing_secret !== pairingSecret) {
+          log(`host-register REJECTED: wrong pairing secret for '${computerId}'`);
+          send(ws, { type: 'error', message: 'register: bad pairing secret' });
+          return;
+        }
+        dbComputer = data;
+      } else {
+        const { data: created, error: insErr } = await supabase
+          .from('rd_computers')
+          .insert({ computer_id: computerId, name, owner_id: null, pairing_secret: pairingSecret })
+          .select('id, owner_id, pairing_secret')
+          .single();
+        if (insErr) throw insErr;
+        dbComputer = created;
+        log(`host-register: new computer row created for '${computerId}'`);
+      }
+    } catch (e) {
+      log('db: register lookup failed:', e.message);
+      send(ws, { type: 'error', message: 'register: database error, try again' });
+      return;
+    }
+
     // Replace any previous registration for this computerId (old one is gone).
     const prev = hosts.get(computerId);
     if (prev && prev !== hostEntry && prev.ws.readyState === prev.ws.OPEN) {
       log(`host-register: replacing stale registration for '${computerId}'`);
       try { prev.ws.close(4000, 'replaced by new registration'); } catch { /* ignore */ }
-      if (prev.client) detachClient(prev, 'host re-registered');
+      if (prev.client) await detachClient(prev, 'host re-registered');
     }
     hostEntry.computerId = computerId;
     hostEntry.name = name;
+    hostEntry.db = dbComputer;
     hosts.set(computerId, hostEntry);
     log(`host-registered: '${name}' as '${computerId}'`);
     send(ws, { type: 'registered', computerId });
@@ -142,7 +278,7 @@ function handleHostMessage(hostEntry, msg) {
     // Host says it's going away on purpose.
     case 'bye':
       log(`host-bye: '${hostEntry.computerId}' signing off`);
-      cleanupHost(hostEntry);
+      await cleanupHost(hostEntry);
       break;
 
     default:
@@ -152,54 +288,170 @@ function handleHostMessage(hostEntry, msg) {
 }
 
 // Remove a host registration; tell its client the host went offline.
-function cleanupHost(hostEntry) {
+async function cleanupHost(hostEntry) {
   if (hostEntry.computerId && hosts.get(hostEntry.computerId) === hostEntry) {
     hosts.delete(hostEntry.computerId);
   }
   if (hostEntry.client) {
     const client = hostEntry.client;
     if (client.idleTimer) clearTimeout(client.idleTimer);
+    await closeSession(client.sessionId);
     send(client.ws, { type: 'host_offline' });
     try { client.ws.close(4001, 'host offline'); } catch { /* ignore */ }
     hostEntry.client = null;
-    log(`host-offline: '${hostEntry.computerId || 'unknown'}' disconnected; client '${client.username}' notified`);
+    log(`host-offline: '${hostEntry.computerId || 'unknown'}' disconnected; client '${client.email}' notified`);
   } else if (hostEntry.computerId) {
     log(`host-offline: '${hostEntry.computerId}' disconnected (no client attached)`);
   }
   hostEntry.computerId = null;
+  hostEntry.db = null;
 }
 
 // ---------------------------------------------------------------------------
 // Client message handling
 // ---------------------------------------------------------------------------
-function handleClientMessage(clientState, msg) {
+async function handleClientMessage(clientState, msg) {
   const ws = clientState.ws;
 
-  // Step 1 — auth is required before anything else.
-  if (msg.type === 'auth') {
-    const username = String(msg.username || '');
+  // Ping works even before auth (lets the client measure latency any time).
+  if (msg.type === 'ping') {
+    send(ws, { type: 'pong', t: msg.t });
+    return;
+  }
+
+  // Step 1 — sign up: { type:'signup', email, password }
+  if (msg.type === 'signup') {
+    if (!dbReady) {
+      send(ws, { type: 'auth_error', message: 'Server database not configured' });
+      return;
+    }
+    const email = String(msg.email || '').trim().toLowerCase();
     const password = String(msg.password || '');
-    if (USERS[username] && USERS[username] === password) {
-      clientState.username = username;
+    if (!validEmail(email)) {
+      send(ws, { type: 'auth_error', message: 'Enter a valid email address' });
+      return;
+    }
+    if (password.length < 8) {
+      send(ws, { type: 'auth_error', message: 'Password must be at least 8 characters' });
+      return;
+    }
+    try {
+      const passHash = await bcrypt.hash(password, 10);
+      const { data, error } = await supabase
+        .from('rd_users')
+        .insert({ email, pass_hash: passHash })
+        .select('id')
+        .single();
+      if (error) {
+        if (error.code === '23505') { // unique violation on email
+          send(ws, { type: 'auth_error', message: 'That email is already registered — try signing in' });
+        } else {
+          throw error;
+        }
+        return;
+      }
       clientState.authed = true;
-      log(`client-auth OK: '${username}'`);
-      send(ws, { type: 'auth_ok' });
-    } else {
-      log(`client-auth FAILED for username '${username || '(blank)'}'`);
-      send(ws, { type: 'auth_error', message: 'Invalid username or password' });
+      clientState.userId = data.id;
+      clientState.email = email;
+      log(`client-signup OK: '${email}'`);
+      send(ws, { type: 'auth_ok', userId: data.id });
+    } catch (e) {
+      log('db: signup failed:', e.message);
+      send(ws, { type: 'auth_error', message: 'Signup failed — try again' });
     }
     return;
   }
 
+  // Step 1 — sign in: { type:'auth', email, password }
+  // (also accepts 'username' for the old MVP client)
+  if (msg.type === 'auth') {
+    if (!dbReady) {
+      send(ws, { type: 'auth_error', message: 'Server database not configured' });
+      return;
+    }
+    const email = String(msg.email || msg.username || '').trim().toLowerCase();
+    const password = String(msg.password || '');
+    try {
+      const { data: user, error } = await supabase
+        .from('rd_users')
+        .select('id, email, pass_hash, totp_enabled')
+        .eq('email', email)
+        .maybeSingle();
+      if (error) throw error;
+      const ok = user && await bcrypt.compare(password, user.pass_hash);
+      if (!ok) {
+        log(`client-auth FAILED for '${email || '(blank)'}`);
+        send(ws, { type: 'auth_error', message: 'Invalid email or password' });
+        return;
+      }
+      if (user.totp_enabled) {
+        // Password was right — now they must finish the second factor.
+        clientState.pending2fa = user.id;
+        log(`client-auth: '${email}' passed password, awaiting 2FA`);
+        send(ws, { type: 'need_2fa', userId: user.id });
+        return;
+      }
+      clientState.authed = true;
+      clientState.userId = user.id;
+      clientState.email = user.email;
+      log(`client-auth OK: '${user.email}'`);
+      send(ws, { type: 'auth_ok', userId: user.id });
+    } catch (e) {
+      log('db: auth failed:', e.message);
+      send(ws, { type: 'auth_error', message: 'Sign-in failed — try again' });
+    }
+    return;
+  }
+
+  // Step 2 of sign-in when 2FA is on: { type:'verify_2fa', userId, token }
+  if (msg.type === 'verify_2fa') {
+    if (!dbReady) {
+      send(ws, { type: 'auth_error', message: 'Server database not configured' });
+      return;
+    }
+    const userId = String(msg.userId || '');
+    const token = String(msg.token || '').replace(/\s/g, '');
+    if (clientState.pending2fa && clientState.pending2fa !== userId) {
+      send(ws, { type: 'auth_error', message: 'Start sign-in again' });
+      return;
+    }
+    try {
+      const { data: user, error } = await supabase
+        .from('rd_users')
+        .select('id, email, totp_secret, totp_enabled')
+        .eq('id', userId)
+        .maybeSingle();
+      if (error) throw error;
+      const valid = user && user.totp_enabled && user.totp_secret &&
+        authenticator.verify({ token, secret: user.totp_secret });
+      if (!valid) {
+        log(`client-2fa FAILED for user '${userId}'`);
+        send(ws, { type: 'auth_error', message: 'Invalid code — try again' });
+        return;
+      }
+      clientState.pending2fa = null;
+      clientState.authed = true;
+      clientState.userId = user.id;
+      clientState.email = user.email;
+      log(`client-2fa OK: '${user.email}'`);
+      send(ws, { type: 'auth_ok', userId: user.id });
+    } catch (e) {
+      log('db: verify_2fa failed:', e.message);
+      send(ws, { type: 'auth_error', message: 'Verification failed — try again' });
+    }
+    return;
+  }
+
+  // Everything below needs a signed-in client.
   if (!clientState.authed) {
-    send(ws, { type: 'auth_error', message: 'Authenticate first' });
+    send(ws, { type: 'auth_error', message: 'Sign in first' });
     return;
   }
 
   switch (msg.type) {
     // Ask for online/offline status of a computer (no pairing yet).
     case 'status': {
-      const computerId = String(msg.computerId || '').trim().toUpperCase();
+      const computerId = normComputerId(msg.computerId);
       const hostEntry = hosts.get(computerId);
       const online = !!hostEntry && hostEntry.ws.readyState === hostEntry.ws.OPEN;
       send(ws, { type: 'status', computerId, online });
@@ -208,24 +460,18 @@ function handleClientMessage(clientState, msg) {
 
     // Pair with a host: { type:'connect', computerId }
     case 'connect': {
-      const computerId = String(msg.computerId || '').trim().toUpperCase();
+      const computerId = normComputerId(msg.computerId);
       const hostEntry = hosts.get(computerId);
       if (!hostEntry || hostEntry.ws.readyState !== hostEntry.ws.OPEN) {
         send(ws, { type: 'status', computerId, online: false });
         return;
       }
       if (hostEntry.client) {
-        log(`client-connect REJECTED (busy): '${clientState.username}' → '${computerId}'`);
+        log(`client-connect REJECTED (busy): '${clientState.email}' → '${computerId}'`);
         send(ws, { type: 'busy' });
         return;
       }
-      // Pair them.
-      clientState.computerId = computerId;
-      hostEntry.client = clientState;
-      log(`client-connected: '${clientState.username}' → '${computerId}' (${hostEntry.name})`);
-      send(ws, { type: 'connected', computerId, name: hostEntry.name });
-      send(hostEntry.ws, { type: 'client_connected' });
-      resetIdleTimer(hostEntry);
+      await attachClient(hostEntry, clientState, hostEntry.db);
       break;
     }
 
@@ -247,10 +493,102 @@ function handleClientMessage(clientState, msg) {
     case 'disconnect': {
       const hostEntry = clientState.computerId ? hosts.get(clientState.computerId) : null;
       if (hostEntry && hostEntry.client === clientState) {
-        detachClient(hostEntry, 'client requested disconnect');
+        await detachClient(hostEntry, 'client requested disconnect');
       }
       clientState.computerId = null;
       send(ws, { type: 'disconnected' });
+      break;
+    }
+
+    // --- 2FA management (all require an authed session) ---
+
+    // Start 2FA setup: returns a secret + otpauth:// URL to scan.
+    case 'setup_2fa': {
+      if (!dbReady) {
+        send(ws, { type: 'auth_error', message: 'Server database not configured' });
+        return;
+      }
+      try {
+        const secret = authenticator.generateSecret();
+        const { error } = await supabase
+          .from('rd_users')
+          .update({ totp_secret: secret })
+          .eq('id', clientState.userId);
+        if (error) throw error;
+        const qrUrl = authenticator.keyuri(clientState.email, 'ECFC Remote Desktop', secret);
+        log(`client-2fa: setup started for '${clientState.email}'`);
+        send(ws, { type: '2fa_secret', secret, qr_url: qrUrl });
+      } catch (e) {
+        log('db: setup_2fa failed:', e.message);
+        send(ws, { type: 'auth_error', message: 'Could not start 2FA setup — try again' });
+      }
+      break;
+    }
+
+    // Finish 2FA setup: prove you can generate codes, then it turns on.
+    case 'enable_2fa': {
+      if (!dbReady) {
+        send(ws, { type: 'auth_error', message: 'Server database not configured' });
+        return;
+      }
+      const token = String(msg.token || '').replace(/\s/g, '');
+      try {
+        const { data: user, error } = await supabase
+          .from('rd_users')
+          .select('totp_secret')
+          .eq('id', clientState.userId)
+          .single();
+        if (error) throw error;
+        const valid = user.totp_secret &&
+          authenticator.verify({ token, secret: user.totp_secret });
+        if (!valid) {
+          send(ws, { type: 'auth_error', message: 'Invalid code — check your authenticator app and try again' });
+          return;
+        }
+        const { error: updErr } = await supabase
+          .from('rd_users')
+          .update({ totp_enabled: true })
+          .eq('id', clientState.userId);
+        if (updErr) throw updErr;
+        log(`client-2fa: enabled for '${clientState.email}'`);
+        send(ws, { type: '2fa_enabled' });
+      } catch (e) {
+        log('db: enable_2fa failed:', e.message);
+        send(ws, { type: 'auth_error', message: 'Could not enable 2FA — try again' });
+      }
+      break;
+    }
+
+    // Turn 2FA off: requires the account password as confirmation.
+    case 'disable_2fa': {
+      if (!dbReady) {
+        send(ws, { type: 'auth_error', message: 'Server database not configured' });
+        return;
+      }
+      const password = String(msg.password || '');
+      try {
+        const { data: user, error } = await supabase
+          .from('rd_users')
+          .select('pass_hash')
+          .eq('id', clientState.userId)
+          .single();
+        if (error) throw error;
+        const ok = await bcrypt.compare(password, user.pass_hash);
+        if (!ok) {
+          send(ws, { type: 'auth_error', message: 'Wrong password — 2FA stays on' });
+          return;
+        }
+        const { error: updErr } = await supabase
+          .from('rd_users')
+          .update({ totp_enabled: false, totp_secret: null })
+          .eq('id', clientState.userId);
+        if (updErr) throw updErr;
+        log(`client-2fa: disabled for '${clientState.email}'`);
+        send(ws, { type: '2fa_disabled' });
+      } catch (e) {
+        log('db: disable_2fa failed:', e.message);
+        send(ws, { type: 'auth_error', message: 'Could not disable 2FA — try again' });
+      }
       break;
     }
 
@@ -270,7 +608,7 @@ const server = http.createServer((req, res) => {
       (h) => h.ws.readyState === h.ws.OPEN
     ).length;
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, hostsOnline: online }));
+    res.end(JSON.stringify({ ok: true, hostsOnline: online, db: dbReady }));
     return;
   }
   res.writeHead(404);
@@ -284,45 +622,60 @@ wss.on('connection', (ws) => {
   // meaningful message decides. Track both possibilities, use one.
   const peer = {
     kind: null, // 'host' | 'client'
-    hostEntry: { ws, computerId: null, name: null, client: null },
-    clientState: { ws, username: null, authed: false, computerId: null, idleTimer: null, lastInputAt: null },
+    hostEntry: { ws, computerId: null, name: null, db: null, client: null },
+    clientState: {
+      ws, authed: false, userId: null, email: null, pending2fa: null,
+      computerId: null, sessionId: null, idleTimer: null, lastInputAt: null,
+    },
   };
 
-  ws.on('message', (raw) => {
+  ws.on('message', async (raw) => {
     const msg = parseJson(raw.toString());
     if (!msg || typeof msg.type !== 'string') {
       send(ws, { type: 'error', message: 'invalid JSON message' });
       return;
     }
 
-    // First message declares the role.
+    // First message declares the role. 'signup'/'verify_2fa' are also client
+    // messages (verify_2fa is step 2 of sign-in, before full auth).
     if (!peer.kind) {
       if (msg.type === 'register') {
         peer.kind = 'host';
-        handleHostMessage(peer.hostEntry, msg);
-      } else if (msg.type === 'auth') {
+        await handleHostMessage(peer.hostEntry, msg).catch((e) => {
+          log('host handler error:', e.message);
+          send(ws, { type: 'error', message: 'server error, try again' });
+        });
+      } else if (msg.type === 'auth' || msg.type === 'signup' || msg.type === 'verify_2fa' || msg.type === 'ping') {
         peer.kind = 'client';
-        handleClientMessage(peer.clientState, msg);
+        await handleClientMessage(peer.clientState, msg).catch((e) => {
+          log('client handler error:', e.message);
+          send(ws, { type: 'error', message: 'server error, try again' });
+        });
       } else {
-        send(ws, { type: 'error', message: "first message must be 'register' (host) or 'auth' (client)" });
+        send(ws, { type: 'error', message: "first message must be 'register' (host), 'auth', 'signup' or 'ping' (client)" });
       }
       return;
     }
 
-    if (peer.kind === 'host') handleHostMessage(peer.hostEntry, msg);
-    else handleClientMessage(peer.clientState, msg);
+    try {
+      if (peer.kind === 'host') await handleHostMessage(peer.hostEntry, msg);
+      else await handleClientMessage(peer.clientState, msg);
+    } catch (e) {
+      log('message handler error:', e.message);
+      send(ws, { type: 'error', message: 'server error, try again' });
+    }
   });
 
-  ws.on('close', () => {
+  ws.on('close', async () => {
     if (peer.kind === 'host') {
-      cleanupHost(peer.hostEntry);
+      await cleanupHost(peer.hostEntry);
     } else if (peer.kind === 'client') {
       const st = peer.clientState;
       const hostEntry = st.computerId ? hosts.get(st.computerId) : null;
       if (hostEntry && hostEntry.client === st) {
-        detachClient(hostEntry, 'socket closed');
-      } else if (st.username) {
-        log(`client-disconnected: '${st.username}' (socket closed, no active session)`);
+        await detachClient(hostEntry, 'socket closed');
+      } else if (st.email) {
+        log(`client-disconnected: '${st.email}' (socket closed, no active session)`);
       }
       if (st.idleTimer) clearTimeout(st.idleTimer);
     }
@@ -336,7 +689,7 @@ wss.on('connection', (ws) => {
 
 server.listen(PORT, () => {
   log(`ECFC Remote Desktop signaling server listening on port ${PORT}`);
-  log(`Pairing secret ${PAIRING_SECRET === 'ecfc-pair-123' ? '(default — set PAIRING_SECRET in production!)' : 'loaded from env'}`);
+  log(`Database: ${dbReady ? 'Supabase connected' : 'NOT CONFIGURED — set SUPABASE_URL + SUPABASE_SERVICE_KEY'}`);
 });
 
 // Graceful shutdown: tell everyone we're going away.

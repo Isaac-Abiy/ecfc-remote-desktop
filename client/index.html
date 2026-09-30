@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#0b0f1a">
+<title>ECFC Remote Desktop</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- Splash -->
+<div id="splash" class="splash">
+  <div class="splash-inner">
+    <div class="logo logo-lg">
+      <svg viewBox="0 0 48 48" width="64" height="64" aria-hidden="true">
+        <rect x="4" y="8" width="40" height="26" rx="4" fill="none" stroke="#6366f1" stroke-width="3"/>
+        <rect x="11" y="14" width="26" height="14" rx="2" fill="#6366f1" opacity="0.35"/>
+        <path d="M18 40h12M24 34v6" stroke="#6366f1" stroke-width="3" stroke-linecap="round"/>
+        <path d="M18 21l5 5 9-10" fill="none" stroke="#a5b4fc" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <h1>ECFC Remote Desktop</h1>
+    <p>Secure access to your office PC</p>
+  </div>
+</div>
+
+<!-- ============ LOGIN ============ -->
+<section id="screen-login" class="screen hidden">
+  <div class="card login-card">
+    <div class="logo">
+      <svg viewBox="0 0 48 48" width="52" height="52" aria-hidden="true">
+        <rect x="4" y="8" width="40" height="26" rx="4" fill="none" stroke="#6366f1" stroke-width="3"/>
+        <rect x="11" y="14" width="26" height="14" rx="2" fill="#6366f1" opacity="0.35"/>
+        <path d="M18 40h12M24 34v6" stroke="#6366f1" stroke-width="3" stroke-linecap="round"/>
+        <path d="M18 21l5 5 9-10" fill="none" stroke="#a5b4fc" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <h1>ECFC Remote Desktop</h1>
+    <p class="muted">Sign in to reach your computers</p>
+
+    <label class="field">
+      <span>Email</span>
+      <input id="login-user" type="email" autocomplete="email" placeholder="you@example.com">
+    </label>
+    <label class="field">
+      <span>Password</span>
+      <input id="login-pass" type="password" autocomplete="current-password" placeholder="••••••••">
+    </label>
+    <label class="field">
+      <span>Server</span>
+      <input id="login-server" type="text" inputmode="url" placeholder="ws://your-server:8080" spellcheck="false">
+    </label>
+
+    <div id="login-error" class="error hidden"></div>
+    <button id="login-btn" class="btn primary btn-block">Sign in</button>
+    <p class="center muted small auth-switch">Don't have an account? <a href="#" id="goto-signup">Sign up</a></p>
+  </div>
+</section>
+
+<!-- ============ SIGNUP ============ -->
+<section id="screen-signup" class="screen hidden">
+  <div class="card login-card">
+    <div class="logo">
+      <svg viewBox="0 0 48 48" width="52" height="52" aria-hidden="true">
+        <rect x="4" y="8" width="40" height="26" rx="4" fill="none" stroke="#6366f1" stroke-width="3"/>
+        <rect x="11" y="14" width="26" height="14" rx="2" fill="#6366f1" opacity="0.35"/>
+        <path d="M18 40h12M24 34v6" stroke="#6366f1" stroke-width="3" stroke-linecap="round"/>
+        <path d="M18 21l5 5 9-10" fill="none" stroke="#a5b4fc" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <h1>Create account</h1>
+    <p class="muted">Sign up for ECFC Remote Desktop</p>
+
+    <label class="field">
+      <span>Email</span>
+      <input id="signup-email" type="email" autocomplete="email" placeholder="you@example.com">
+    </label>
+    <label class="field">
+      <span>Password</span>
+      <input id="signup-pass" type="password" autocomplete="new-password" placeholder="At least 8 characters">
+    </label>
+    <label class="field">
+      <span>Confirm password</span>
+      <input id="signup-pass2" type="password" autocomplete="new-password" placeholder="Repeat your password">
+    </label>
+    <label class="field">
+      <span>Server</span>
+      <input id="signup-server" type="text" inputmode="url" placeholder="ws://your-server:8080" spellcheck="false">
+    </label>
+
+    <div id="signup-error" class="error hidden"></div>
+    <button id="signup-btn" class="btn primary btn-block">Create account</button>
+    <p class="center muted small auth-switch">Already have an account? <a href="#" id="goto-signin">Sign in</a></p>
+  </div>
+</section>
+
+<!-- ============ 2FA VERIFY ============ -->
+<section id="screen-2fa" class="screen hidden">
+  <div class="card login-card">
+    <div class="logo">
+      <svg viewBox="0 0 48 48" width="52" height="52" aria-hidden="true">
+        <rect x="4" y="8" width="40" height="26" rx="4" fill="none" stroke="#6366f1" stroke-width="3"/>
+        <rect x="11" y="14" width="26" height="14" rx="2" fill="#6366f1" opacity="0.35"/>
+        <path d="M18 40h12M24 34v6" stroke="#6366f1" stroke-width="3" stroke-linecap="round"/>
+        <path d="M18 21l5 5 9-10" fill="none" stroke="#a5b4fc" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <h1>Two-factor authentication</h1>
+    <p class="muted">Enter the 6-digit code from your authenticator app.</p>
+
+    <label class="field">
+      <span>Code</span>
+      <input id="tfa-code" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6"
+             placeholder="123456" autocomplete="one-time-code" class="code-input">
+    </label>
+
+    <div id="tfa-error" class="error hidden"></div>
+    <button id="tfa-btn" class="btn primary btn-block">Verify</button>
+    <p class="center muted small auth-switch"><a href="#" id="tfa-back">← Back to sign in</a></p>
+  </div>
+</section>
+
+<!-- ============ HOME ============ -->
+<section id="screen-home" class="screen hidden">
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 48 48" width="28" height="28" aria-hidden="true">
+        <rect x="4" y="8" width="40" height="26" rx="4" fill="none" stroke="#6366f1" stroke-width="3"/>
+        <path d="M18 40h12M24 34v6" stroke="#6366f1" stroke-width="3" stroke-linecap="round"/>
+      </svg>
+      <span>ECFC Remote Desktop</span>
+    </div>
+    <div class="topbar-right">
+      <span id="home-user" class="muted small"></span>
+      <button id="settings-btn" class="btn ghost small" title="Settings">⚙️</button>
+      <button id="logout-btn" class="btn ghost small">Sign out</button>
+    </div>
+  </header>
+
+  <main class="home-main">
+    <div class="card">
+      <h2>Add a computer</h2>
+      <p class="muted small">Enter the 6-character ID shown on your office PC's host app.</p>
+      <div class="add-row">
+        <input id="add-id" type="text" maxlength="6" placeholder="ABC123" spellcheck="false"
+               autocomplete="off" autocapitalize="characters">
+        <button id="add-btn" class="btn primary">Add</button>
+      </div>
+      <div id="add-error" class="error hidden"></div>
+    </div>
+
+    <div class="list-header">
+      <h2>My computers</h2>
+      <button id="refresh-btn" class="btn ghost small">↻ Refresh</button>
+    </div>
+    <div id="computer-list" class="computer-list"></div>
+    <p id="empty-hint" class="muted center hidden">No computers yet — add one above to get started.</p>
+  </main>
+</section>
+
+<!-- ============ SETTINGS ============ -->
+<section id="screen-settings" class="screen hidden">
+  <header class="topbar">
+    <button id="settings-back" class="btn ghost small">← Back</button>
+    <div class="brand"><span>Settings</span></div>
+  </header>
+
+  <main class="home-main">
+    <div class="card">
+      <h2>Two-factor authentication</h2>
+      <p class="muted small">Add an extra layer of security with an authenticator app (optional).</p>
+
+      <div id="tfa-setup-view">
+        <button id="tfa-enable-btn" class="btn primary">Enable 2FA</button>
+      </div>
+
+      <div id="tfa-qr-view" class="hidden">
+        <p class="muted small">Scan this QR code with Google Authenticator or any authenticator app, then enter the 6-digit code below.</p>
+        <div class="qr-wrap"><img id="tfa-qr" alt="2FA QR code"></div>
+        <p class="muted small">Or enter this secret manually:</p>
+        <code id="tfa-secret" class="secret-code"></code>
+        <label class="field">
+          <span>Code from your app</span>
+          <input id="tfa-setup-code" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6"
+                 placeholder="123456" autocomplete="one-time-code" class="code-input">
+        </label>
+        <div id="tfa-setup-error" class="error hidden"></div>
+        <button id="tfa-confirm-btn" class="btn primary">Confirm &amp; enable</button>
+      </div>
+
+      <div id="tfa-enabled-view" class="hidden">
+        <p class="success-line">✅ 2FA is enabled on your account.</p>
+        <button id="tfa-disable-btn" class="btn danger">Disable 2FA</button>
+      </div>
+
+      <div id="tfa-disable-view" class="hidden">
+        <label class="field">
+          <span>Confirm your password</span>
+          <input id="tfa-disable-pass" type="password" autocomplete="current-password" placeholder="••••••••">
+        </label>
+        <div id="tfa-disable-error" class="error hidden"></div>
+        <div class="row-btns">
+          <button id="tfa-disable-cancel" class="btn ghost">Cancel</button>
+          <button id="tfa-disable-confirm" class="btn danger">Disable 2FA</button>
+        </div>
+      </div>
+    </div>
+  </main>
+</section>
+
+<!-- ============ SESSION ============ -->
+<section id="screen-session" class="screen hidden">
+  <div id="toolbar" class="toolbar">
+    <button id="disc-btn" class="btn danger small" title="Disconnect">✕</button>
+    <span id="session-title" class="session-title">—</span>
+    <span class="dot-sep"></span>
+    <span class="stats"><span id="stat-fps">0 FPS</span> · <span id="stat-ping">— ms</span></span>
+    <span class="spacer"></span>
+    <button id="kb-btn" class="btn ghost small" title="Toggle keyboard">⌨️</button>
+    <button id="fit-btn" class="btn ghost small" title="Toggle fit-to-screen">⛶</button>
+  </div>
+
+  <div id="viewport" class="viewport" tabindex="0">
+    <img id="frame-img" class="frame fit" alt="Remote desktop" draggable="false">
+    <div id="session-msg" class="session-msg hidden"></div>
+  </div>
+
+  <!-- Mobile special-keys bar (shown when keyboard is toggled on) -->
+  <div id="keybar" class="keybar hidden">
+    <button data-k="mod-ctrl">Ctrl</button>
+    <button data-k="mod-alt">Alt</button>
+    <button data-k="mod-shift">Shift</button>
+    <button data-k="mod-meta">Win</button>
+    <button data-k="Escape">Esc</button>
+    <button data-k="Tab">Tab</button>
+    <button data-k="Delete">Del</button>
+  </div>
+
+  <!-- Hidden input: focusing it summons the soft keyboard on phones -->
+  <input id="key-catcher" class="key-catcher" type="text" autocomplete="off"
+         autocapitalize="off" autocorrect="off" spellcheck="false" aria-hidden="true" tabindex="-1">
+</section>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
