@@ -51,19 +51,26 @@ On your **Windows office PC**:
 
 ## Step 3: Connect From Your Phone or Laptop
 
-1. Open **https://ecfc-remote-desktop-2fyqje40v-isaac-17f4.vercel.app** in your browser
-2. Enter the **server URL** (the `wss://` one) — it's saved after the first time
-3. Log in (default: username `isaac`, password `password123` — **change this!**)
-4. Click **Add Computer** → enter your 6-character Computer ID
-5. When it shows **online** (green dot), hit **Connect**
-6. You're in! Move your mouse, click, type — it all controls the office PC.
+1. Open **https://ecfc-remote-desktop.vercel.app** in your browser
+2. Create your account (or sign in)
+3. Click **Add Computer** → enter your 6-character Computer ID
+4. When it shows **online** (green dot), hit **Connect**
+5. You're in! Move your mouse, click, type — it all controls the office PC.
+   **Several people can connect to the same PC at the same time.**
 
 ### Phone Gestures
 - **Tap** = left click
 - **Drag** = move mouse
 - **Two-finger drag** = scroll
 - **Long-press** (hold 0.5 sec) = right click
-- **⌨️ button** = show keyboard with Ctrl/Alt/Shift/Win keys
+- **⌨️ button** = show keyboard with Ctrl/Alt/Shift/Win keys; the second **⌨️ Type** button sends a whole sentence at once
+
+### Files
+- **📤 Upload** sends a file from your device to `Desktop\ECFC-Uploads` on the office PC (max 100 MB, with a progress bar)
+- **📁 Files** lists that folder: download any file to your device, rename, or delete it
+
+### Screen quality
+The host streams at ~30 FPS and automatically lowers JPEG quality (never resolution) if the connection gets slow, then recovers when it's fast again.
 
 ## Changing the Login Password
 
@@ -84,9 +91,11 @@ Then redeploy on Render (it auto-deploys when you push to GitHub).
 
 ## What's Next (Future Features)
 
-- [ ] File transfer between devices
+- [x] File transfer between devices — **done** (upload/download/rename/delete via ECFC-Uploads)
+- [x] Two-factor authentication — **done**
+- [x] Multiple people controlling one PC at the same time — **done**
+- [x] 30 FPS screen streaming — **done** (adaptive quality)
 - [ ] Native phone apps (no browser needed)
-- [ ] Two-factor authentication
 - [ ] Wake-on-LAN (turn on the PC remotely)
 - [ ] Session recording
 - [ ] Audio streaming
