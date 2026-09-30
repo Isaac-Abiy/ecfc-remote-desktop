@@ -55,7 +55,11 @@ html, body {
   flex-direction: column;
 }
 
-#screen-login { align-items: center; justify-content: center; padding: 20px; }
+#screen-login, #screen-signup, #screen-2fa {
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
 
 /* ---------- Cards / forms ---------- */
 .card {
@@ -325,4 +329,9 @@ input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(99,102,241
 @media (min-width: 700px) {
   .card h1 { font-size: 1.6rem; }
   .toolbar { padding: 8px 16px; }
+  /* Auth cards: a bit roomier on desktop, still centered */
+  #screen-login .card, #screen-signup .card, #screen-2fa .card {
+    max-width: 440px;
+    padding: 32px;
+  }
 }
