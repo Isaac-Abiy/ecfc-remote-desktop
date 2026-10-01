@@ -48,8 +48,19 @@ UPLOAD_DIRNAME = "ECFC-Uploads"            # folder on the Desktop
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024      # 100 MB cap per file
 CHUNK_BYTES = 36 * 1024                   # binary bytes -> ~48 KB base64/chunk
 
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "config.json")
+def _base_dir():
+    # When frozen (PyInstaller .exe), __file__ lives inside a temp folder
+    # that Windows deletes on exit — so keep config.json next to the .exe.
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+CONFIG_PATH = os.path.join(_base_dir(), "config.json")
+
+# Production signaling server. The .exe double-click flow uses this with no
+# questions asked; the .py flow still lets you override it on first run.
+DEFAULT_SERVER_URL = "wss://ecfc-remote-desktop.onrender.com"
 
 
 # ---------------------------------------------------------------------------
@@ -71,10 +82,36 @@ def _random_secret(length=32):
 def _normalize_server_url(url):
     url = (url or "").strip()
     if not url:
-        return "ws://localhost:8080"
+        return DEFAULT_SERVER_URL
     if "://" not in url:
         url = "ws://" + url
     return url.rstrip("/")
+
+
+def _has_console():
+    """True when we can interactively prompt (not a --noconsole .exe)."""
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except Exception:
+        return False
+
+
+def _show_first_run_info(computer_id):
+    """Pop up the Computer ID when there's no console to print it to."""
+    try:
+        import tkinter
+        from tkinter import messagebox
+        root = tkinter.Tk()
+        root.withdraw()
+        messagebox.showinfo(
+            "ECFC Remote Desktop",
+            "This PC is now connected!\n\nComputer ID: %s\n\n"
+            "Enter this ID in the ECFC Remote Desktop website "
+            "to view and control this PC." % computer_id,
+        )
+        root.destroy()
+    except Exception:
+        pass
 
 
 def save_config(cfg):
@@ -83,7 +120,12 @@ def save_config(cfg):
 
 
 def load_or_create_config():
-    """Load config.json, or interactively create it on first run."""
+    """Load config.json, or create it on first run.
+
+    Fully non-interactive when there's no console (the --noconsole .exe):
+    sensible defaults are used, the Computer ID pops up in a window, and
+    the config is saved next to the .exe so the ID stays stable.
+    """
     if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             cfg = json.load(f)
@@ -99,17 +141,21 @@ def load_or_create_config():
             cfg["name"] = "Office PC"
             changed = True
         if not cfg.get("serverUrl"):
-            cfg["serverUrl"] = "ws://localhost:8080"
+            cfg["serverUrl"] = DEFAULT_SERVER_URL
             changed = True
         if changed:
             save_config(cfg)
         return cfg
 
-    print("=" * 60)
-    print("ECFC Remote Desktop - first-time setup")
-    print("=" * 60)
-    name = input("Computer name [Office PC]: ").strip() or "Office PC"
-    raw_url = input("Signaling server URL [ws://localhost:8080]: ").strip()
+    interactive = _has_console()
+    if interactive:
+        print("=" * 60)
+        print("ECFC Remote Desktop - first-time setup")
+        print("=" * 60)
+        name = input("Computer name [Office PC]: ").strip() or "Office PC"
+        raw_url = input("Signaling server URL [%s]: " % DEFAULT_SERVER_URL).strip()
+    else:
+        name, raw_url = "Office PC", ""
     cfg = {
         "computerId": _random_id(),
         "name": name,
@@ -117,12 +163,15 @@ def load_or_create_config():
         "secret": _random_secret(),
     }
     save_config(cfg)
-    print()
-    print("Saved to %s" % CONFIG_PATH)
-    print("  Computer ID : %s   <-- enter this in the client app"
-          % cfg["computerId"])
-    print("  Pairing secret (keep private): %s" % cfg["secret"])
-    print()
+    if interactive:
+        print()
+        print("Saved to %s" % CONFIG_PATH)
+        print("  Computer ID : %s   <-- enter this in the client app"
+              % cfg["computerId"])
+        print("  Pairing secret (keep private): %s" % cfg["secret"])
+        print()
+    else:
+        _show_first_run_info(cfg["computerId"])
     return cfg
 
 
