@@ -179,41 +179,6 @@ def load_or_create_config():
 # Input handling (pynput)
 # ---------------------------------------------------------------------------
 
-SPECIAL_KEYS = {
-    "enter": Key.enter, "return": Key.enter,
-    "backspace": Key.backspace, "back": Key.backspace,
-    "tab": Key.tab,
-    "escape": Key.esc, "esc": Key.esc,
-    "shift": Key.shift, "shift_l": Key.shift_l, "shift_r": Key.shift_r,
-    "ctrl": Key.ctrl, "control": Key.ctrl,
-    "ctrl_l": Key.ctrl_l, "ctrl_r": Key.ctrl_r,
-    "alt": Key.alt, "alt_l": Key.alt_l, "alt_r": Key.alt_r,
-    "altgr": Key.alt_gr,
-    "win": Key.cmd, "windows": Key.cmd, "cmd": Key.cmd,
-    "meta": Key.cmd, "super": Key.cmd,
-    "cmd_l": Key.cmd_l, "cmd_r": Key.cmd_r,
-    "up": Key.up, "down": Key.down, "left": Key.left, "right": Key.right,
-    "space": Key.space, "spacebar": Key.space,
-    "delete": Key.delete, "del": Key.delete,
-    "home": Key.home, "end": Key.end,
-    "pageup": Key.page_up, "page_up": Key.page_up,
-    "pagedown": Key.page_down, "page_down": Key.page_down,
-    "insert": Key.insert, "ins": Key.insert,
-    "capslock": Key.caps_lock, "caps_lock": Key.caps_lock,
-    "numlock": Key.num_lock, "scrolllock": Key.scroll_lock,
-    "printscreen": Key.print_screen, "prtsc": Key.print_screen,
-    "pause": Key.pause, "break": Key.pause,
-    "menu": Key.menu,
-}
-# F1-F12
-for _i in range(1, 13):
-    SPECIAL_KEYS["f%d" % _i] = getattr(Key, "f%d" % _i)
-
-MOUSE_BUTTONS = {
-    "left": Button.left,
-    "right": Button.right,
-    "middle": Button.middle,
-}
 
 
 def resolve_key(name):
@@ -705,6 +670,43 @@ import websockets
 from PIL import Image
 from pynput.keyboard import Controller as KeyboardController, Key, KeyCode
 from pynput.mouse import Button, Controller as MouseController
+
+SPECIAL_KEYS = {
+    "enter": Key.enter, "return": Key.enter,
+    "backspace": Key.backspace, "back": Key.backspace,
+    "tab": Key.tab,
+    "escape": Key.esc, "esc": Key.esc,
+    "shift": Key.shift, "shift_l": Key.shift_l, "shift_r": Key.shift_r,
+    "ctrl": Key.ctrl, "control": Key.ctrl,
+    "ctrl_l": Key.ctrl_l, "ctrl_r": Key.ctrl_r,
+    "alt": Key.alt, "alt_l": Key.alt_l, "alt_r": Key.alt_r,
+    "altgr": Key.alt_gr,
+    "win": Key.cmd, "windows": Key.cmd, "cmd": Key.cmd,
+    "meta": Key.cmd, "super": Key.cmd,
+    "cmd_l": Key.cmd_l, "cmd_r": Key.cmd_r,
+    "up": Key.up, "down": Key.down, "left": Key.left, "right": Key.right,
+    "space": Key.space, "spacebar": Key.space,
+    "delete": Key.delete, "del": Key.delete,
+    "home": Key.home, "end": Key.end,
+    "pageup": Key.page_up, "page_up": Key.page_up,
+    "pagedown": Key.page_down, "page_down": Key.page_down,
+    "insert": Key.insert, "ins": Key.insert,
+    "capslock": Key.caps_lock, "caps_lock": Key.caps_lock,
+    "numlock": Key.num_lock, "scrolllock": Key.scroll_lock,
+    "printscreen": Key.print_screen, "prtsc": Key.print_screen,
+    "pause": Key.pause, "break": Key.pause,
+    "menu": Key.menu,
+}
+# F1-F12
+for _i in range(1, 13):
+    SPECIAL_KEYS["f%d" % _i] = getattr(Key, "f%d" % _i)
+
+MOUSE_BUTTONS = {
+    "left": Button.left,
+    "right": Button.right,
+    "middle": Button.middle,
+}
+
 
 
 def main():
