@@ -56,7 +56,27 @@ def _base_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
-CONFIG_PATH = os.path.join(_base_dir(), "config.json")
+def _config_path():
+    """config.json next to the .exe; falls back to %APPDATA% if that folder
+    isn't writable (no admin needed anywhere)."""
+    primary = os.path.join(_base_dir(), "config.json")
+    try:
+        test = os.path.join(_base_dir(), ".ecfc_write_test")
+        with open(test, "w") as f:
+            f.write("x")
+        os.remove(test)
+        return primary
+    except Exception:
+        appdata = os.environ.get("APPDATA") or os.path.expanduser("~")
+        d = os.path.join(appdata, "ECFC-Remote-Desktop")
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            pass
+        return os.path.join(d, "config.json")
+
+
+CONFIG_PATH = _config_path()
 
 # Production signaling server. The .exe double-click flow uses this with no
 # questions asked; the .py flow still lets you override it on first run.
@@ -97,19 +117,19 @@ def _has_console():
 
 
 def _show_first_run_info(computer_id):
-    """Pop up the Computer ID when there's no console to print it to."""
+    """Pop up the 6-digit Computer ID. Uses the native Windows message box
+    (ctypes) — always available, no tkinter, no console, no admin needed."""
     try:
-        import tkinter
-        from tkinter import messagebox
-        root = tkinter.Tk()
-        root.withdraw()
-        messagebox.showinfo(
-            "ECFC Remote Desktop",
-            "This PC is now connected!\n\nComputer ID: %s\n\n"
-            "Enter this ID in the ECFC Remote Desktop website "
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(
+            None,
+            "This PC is now connected!\n\n"
+            "Computer ID: %s\n\n"
+            "Enter this 6-digit ID in the ECFC Remote Desktop website "
             "to view and control this PC." % computer_id,
+            "ECFC Remote Desktop",
+            0x40,  # MB_ICONINFORMATION
         )
-        root.destroy()
     except Exception:
         pass
 
