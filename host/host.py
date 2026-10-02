@@ -26,11 +26,9 @@ import string
 import sys
 import time
 
-import mss
-import websockets
-from PIL import Image
-from pynput.keyboard import Controller as KeyboardController, Key, KeyCode
-from pynput.mouse import Button, Controller as MouseController
+# NOTE: heavy third-party imports (mss, websockets, PIL, pynput) are done
+# AFTER the early code popup below — they take many seconds to load in the
+# frozen .exe, and the popup must appear instantly on double-click.
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -116,24 +114,6 @@ def _has_console():
         return False
 
 
-def _show_first_run_info(computer_id):
-    """Pop up the 6-digit Computer ID. Uses the native Windows message box
-    (ctypes) — always available, no tkinter, no console, no admin needed."""
-    try:
-        import ctypes
-        ctypes.windll.user32.MessageBoxW(
-            None,
-            "This PC is now connected!\n\n"
-            "Computer ID: %s\n\n"
-            "Enter this 6-digit ID in the ECFC Remote Desktop website "
-            "to view and control this PC." % computer_id,
-            "ECFC Remote Desktop",
-            0x40,  # MB_ICONINFORMATION
-        )
-    except Exception:
-        pass
-
-
 def save_config(cfg):
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
@@ -190,8 +170,8 @@ def load_or_create_config():
               % cfg["computerId"])
         print("  Pairing secret (keep private): %s" % cfg["secret"])
         print()
-    else:
-        _show_first_run_info(cfg["computerId"])
+    # NOTE: the code popup is shown on every run by the early-startup block
+    # near main(), so nothing is needed here.
     return cfg
 
 
@@ -685,6 +665,46 @@ async def agent_main(cfg):
         except asyncio.CancelledError:
             break
         backoff = min(backoff * 2, RECONNECT_MAX_BACKOFF)
+
+
+def _show_code_popup(computer_id):
+    """Show the 6-digit Computer ID in a native Windows message box.
+
+    Shown on EVERY run (not just the first) so the code is always visible.
+    Topmost + system-modal so it can't hide behind other windows.
+    Uses ctypes only — no tkinter, no console, no admin needed."""
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(
+            None,
+            "This PC is now connected!\n\n"
+            "Computer ID: %s\n\n"
+            "Enter this 6-digit ID in the ECFC Remote Desktop website "
+            "to view and control this PC." % computer_id,
+            "ECFC Remote Desktop",
+            0x40 | 0x1000 | 0x2000,  # MB_ICONINFORMATION | MB_SYSTEMMODAL | MB_TOPMOST
+        )
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Early startup: show the 6-digit code popup BEFORE the heavy imports below.
+# This runs at module load so the user sees the code instantly on double-click
+# instead of staring at nothing while mss/PIL/pynput load.
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    try:
+        _boot_cfg = load_or_create_config()
+        _show_code_popup(_boot_cfg["computerId"])
+    except Exception:
+        pass
+
+import mss
+import websockets
+from PIL import Image
+from pynput.keyboard import Controller as KeyboardController, Key, KeyCode
+from pynput.mouse import Button, Controller as MouseController
 
 
 def main():
