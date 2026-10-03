@@ -15,11 +15,17 @@
 // Run:  npm install && npm start
 // Env:  PORT (default 8080)
 //       SUPABASE_URL, SUPABASE_SERVICE_KEY  (required for auth/pairing)
+//       MYDESK_API_KEY                     (sends the password-reset email via
+//                                           the MyDesk MCP Gmail API; without it,
+//                                           reset codes are created but can't be emailed)
+//       MYDESK_MCP_URL                     (optional override, defaults to the
+//                                           MyDesk site's /api/mcp endpoint)
 // ============================================================================
 
 'use strict';
 
 const http = require('http');
+const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 const bcrypt = require('bcryptjs');
 const { authenticator } = require('otplib');
@@ -34,6 +40,15 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
 
 // A session dies after this long with no input event from the client.
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+
+// Forgot-password: reset codes are 6 digits, good for 15 minutes, single-use.
+// Email goes out through Isaac's MyDesk MCP Gmail API (key kept server-side).
+const RESET_CODE_TTL_MS = 15 * 60 * 1000;
+const RESET_MAX_PER_HOUR = 5;  // codes per account per hour (rate limit)
+const RESET_MAX_ATTEMPTS = 5;  // wrong-code guesses before a code dies
+const MYDESK_API_KEY = process.env.MYDESK_API_KEY || '';
+const MYDESK_MCP_URL = process.env.MYDESK_MCP_URL ||
+  'https://mydesk-calendar-mail.vercel.app/api/mcp';
 
 // Allow one step of clock skew on TOTP codes (30s before/after).
 authenticator.options = { window: 1 };
@@ -97,6 +112,59 @@ function validEmail(email) {
 
 function normComputerId(v) {
   return String(v || '').trim().toUpperCase();
+}
+
+// ---------------------------------------------------------------------------
+// Forgot-password helpers
+// ---------------------------------------------------------------------------
+function sha256Hex(s) {
+  return crypto.createHash('sha256').update(String(s), 'utf8').digest('hex');
+}
+
+// A 6-digit code, crypto-random (never Math.random for security codes).
+function randResetCode() {
+  return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+}
+
+// Send the reset code through the MyDesk MCP Gmail API (JSON-RPC tools/call).
+// Throws on any failure; callers log it and still answer the client the same
+// way so a mail hiccup never reveals account/config state.
+async function sendResetEmail(to, code) {
+  if (!MYDESK_API_KEY) throw new Error('MYDESK_API_KEY is not set');
+  const minutes = Math.round(RESET_CODE_TTL_MS / 60000);
+  const res = await fetch(MYDESK_MCP_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + MYDESK_API_KEY,
+    },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: Date.now(),
+      method: 'tools/call',
+      params: {
+        name: 'gmail_send',
+        arguments: {
+          to,
+          subject: 'ECFC Remote Desktop - password reset code',
+          body:
+            'Hi!\n\n' +
+            'Someone asked to reset the password for your ECFC Remote Desktop account.\n\n' +
+            'Your reset code is: ' + code + '\n\n' +
+            'Enter it in the app within ' + minutes + ' minutes to choose a new password.\n\n' +
+            "If this wasn't you, just ignore this email - your password stays the same.\n\n" +
+            '- ECFC Remote Desktop',
+        },
+      },
+    }),
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  if (data && data.error) throw new Error(data.error.message || 'JSON-RPC error');
+  if (data && data.result && data.result.isError) {
+    const t = data.result.content && data.result.content[0] && data.result.content[0].text;
+    throw new Error(t || 'mail tool error');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -492,6 +560,138 @@ async function handleClientMessage(clientState, msg) {
     return;
   }
 
+  // --- Forgot password (pre-auth) ---
+
+  // Step 1: { type:'request_reset', email }
+  // Always answers { type:'reset_sent' } — never reveals whether the email
+  // is registered, so nobody can probe the account list.
+  if (msg.type === 'request_reset') {
+    if (!dbReady) {
+      send(ws, { type: 'auth_error', message: 'Server database not configured' });
+      return;
+    }
+    const email = String(msg.email || '').trim().toLowerCase();
+    const done = () => send(ws, { type: 'reset_sent' });
+    if (!validEmail(email)) { done(); return; }
+    try {
+      const { data: user, error } = await supabase
+        .from('rd_users')
+        .select('id')
+        .eq('email', email)
+        .maybeSingle();
+      if (error) throw error;
+      if (user) {
+        // Rate limit: only a few codes per account per hour.
+        const hourAgo = new Date(Date.now() - 3600 * 1000).toISOString();
+        const { count, error: cntErr } = await supabase
+          .from('rd_password_resets')
+          .select('id', { count: 'exact', head: true })
+          .eq('user_id', user.id)
+          .gte('created_at', hourAgo);
+        if (cntErr) throw cntErr;
+        if ((count || 0) < RESET_MAX_PER_HOUR) {
+          // Kill any older unused codes — only the newest one works.
+          await supabase
+            .from('rd_password_resets')
+            .update({ used: true })
+            .eq('user_id', user.id)
+            .eq('used', false);
+          const code = randResetCode();
+          const { error: insErr } = await supabase
+            .from('rd_password_resets')
+            .insert({
+              user_id: user.id,
+              code_hash: sha256Hex(code), // the plain code is NEVER stored
+              expires_at: new Date(Date.now() + RESET_CODE_TTL_MS).toISOString(),
+            });
+          if (insErr) throw insErr;
+          log(`client-reset: code issued for '${email}'`);
+          try {
+            await sendResetEmail(email, code);
+          } catch (e) {
+            log('client-reset: email failed:', e.message);
+          }
+        } else {
+          log(`client-reset: rate-limited '${email}'`);
+        }
+      }
+      done();
+    } catch (e) {
+      log('db: request_reset failed:', e.message);
+      done(); // still answer the same way — don't leak DB state
+    }
+    return;
+  }
+
+  // Step 2: { type:'reset_password', email, code, password }
+  if (msg.type === 'reset_password') {
+    if (!dbReady) {
+      send(ws, { type: 'auth_error', message: 'Server database not configured' });
+      return;
+    }
+    const email = String(msg.email || '').trim().toLowerCase();
+    const code = String(msg.code || '').replace(/\D/g, '');
+    const password = String(msg.password || '');
+    const bad = () => send(ws, { type: 'auth_error', message: 'Invalid or expired code — request a new one' });
+    if (password.length < 8) {
+      send(ws, { type: 'auth_error', message: 'Password must be at least 8 characters' });
+      return;
+    }
+    try {
+      const { data: user, error } = await supabase
+        .from('rd_users')
+        .select('id')
+        .eq('email', email)
+        .maybeSingle();
+      if (error) throw error;
+      let ok = false;
+      if (user && code.length === 6) {
+        const { data: row, error: rowErr } = await supabase
+          .from('rd_password_resets')
+          .select('id, code_hash, expires_at, used, attempts')
+          .eq('user_id', user.id)
+          .eq('used', false)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (rowErr) throw rowErr;
+        const fresh = row && new Date(row.expires_at) > new Date() &&
+          (row.attempts || 0) < RESET_MAX_ATTEMPTS;
+        if (fresh) {
+          // Constant-time compare so guesses can't be timed.
+          const a = Buffer.from(row.code_hash, 'hex');
+          const b = Buffer.from(sha256Hex(code), 'hex');
+          if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
+            const passHash = await bcrypt.hash(password, 10);
+            const { error: updErr } = await supabase
+              .from('rd_users')
+              .update({ pass_hash: passHash })
+              .eq('id', user.id);
+            if (updErr) throw updErr;
+            await supabase
+              .from('rd_password_resets')
+              .update({ used: true })
+              .eq('id', row.id);
+            ok = true;
+          } else {
+            // Wrong guess: count it so brute-forcing dies after a few tries.
+            await supabase
+              .from('rd_password_resets')
+              .update({ attempts: (row.attempts || 0) + 1 })
+              .eq('id', row.id);
+          }
+        }
+      }
+      if (!ok) { bad(); return; }
+      log(`client-reset: password changed for '${email}'`);
+      send(ws, { type: 'password_reset' });
+    } catch (e) {
+      log('db: reset_password failed:', e.message);
+      send(ws, { type: 'auth_error', message: 'Reset failed — try again' });
+    }
+    return;
+  }
+
   // Everything below needs a signed-in client.
   if (!clientState.authed) {
     send(ws, { type: 'auth_error', message: 'Sign in first' });
@@ -722,14 +922,14 @@ wss.on('connection', (ws) => {
           log('host handler error:', e.message);
           send(ws, { type: 'error', message: 'server error, try again' });
         });
-      } else if (msg.type === 'auth' || msg.type === 'signup' || msg.type === 'verify_2fa' || msg.type === 'ping') {
+      } else if (msg.type === 'auth' || msg.type === 'signup' || msg.type === 'verify_2fa' || msg.type === 'request_reset' || msg.type === 'reset_password' || msg.type === 'ping') {
         peer.kind = 'client';
         await handleClientMessage(peer.clientState, msg).catch((e) => {
           log('client handler error:', e.message);
           send(ws, { type: 'error', message: 'server error, try again' });
         });
       } else {
-        send(ws, { type: 'error', message: "first message must be 'register' (host), 'auth', 'signup' or 'ping' (client)" });
+        send(ws, { type: 'error', message: "first message must be 'register' (host), 'auth', 'signup', 'request_reset' or 'ping' (client)" });
       }
       return;
     }

@@ -39,6 +39,8 @@ npm start
 | `PORT`                | no       | `8080`  | Port the server listens on                               |
 | `SUPABASE_URL`        | **yes**  | —       | Your Supabase project URL                                |
 | `SUPABASE_SERVICE_KEY`| **yes**  | —       | Supabase **service_role** key (secret! server-side only) |
+| `MYDESK_API_KEY`      | no       | —       | MyDesk MCP API key — lets the server email password-reset codes through your Gmail. Without it, "Forgot password" codes are created but never emailed. (secret! server-side only) |
+| `MYDESK_MCP_URL`      | no       | MyDesk site `/api/mcp` | Override for the MyDesk MCP endpoint |
 
 Without `SUPABASE_URL`/`SUPABASE_SERVICE_KEY` the server still starts, but
 sign-up, sign-in, pairing and the access log are disabled (clients get a clear

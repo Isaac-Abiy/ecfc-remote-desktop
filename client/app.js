@@ -82,6 +82,7 @@
     username: '',
     email: '',
     pendingUserId: null,     // set when server asks for a 2FA code at sign-in
+    resetEmail: null,        // email typed into the forgot-password flow
     tfaEnabled: false,       // whether the signed-in account has 2FA on
     computers: loadComputers(),   // [{ id, name }]
     statuses: {},                // computerId -> true/false/null(unknown)
@@ -113,6 +114,14 @@
       signupServer = $('signup-server'), signupBtn = $('signup-btn'), signupError = $('signup-error'),
       tfaCode = $('tfa-code'), tfaBtn = $('tfa-btn'), tfaError = $('tfa-error'),
       tfaBack = $('tfa-back'), gotoSignup = $('goto-signup'), gotoSignin = $('goto-signin'),
+      gotoReset = $('goto-reset'), resetScreen = $('screen-reset'),
+      resetEmail = $('reset-email'), resetSendBtn = $('reset-send-btn'),
+      resetError = $('reset-error'), resetStepEmail = $('reset-step-email'),
+      resetStepCode = $('reset-step-code'), resetCode = $('reset-code'),
+      resetPass = $('reset-pass'), resetPass2 = $('reset-pass2'),
+      resetError2 = $('reset-error2'), resetConfirmBtn = $('reset-confirm-btn'),
+      resetSentTo = $('reset-sent-to'), resetBack = $('reset-back'),
+      resetResend = $('reset-resend'),
       settingsBtn = $('settings-btn'), settingsBack = $('settings-back'),
       tfaSetupView = $('tfa-setup-view'), tfaQrView = $('tfa-qr-view'),
       tfaEnabledView = $('tfa-enabled-view'), tfaDisableView = $('tfa-disable-view'),
@@ -138,10 +147,6 @@
       transferProgress = $('transfer-progress'), transferBar = $('transfer-bar'),
       transferLabel = $('transfer-label'),
       viewonlyBadge = $('viewonly-badge'),
-      hostScreen = $('screen-host'), sharePcBtn = $('share-pc-btn'),
-      hostBack = $('host-back'), hostNameInput = $('host-name'), hostIdInput = $('host-id'),
-      hostStatus = $('host-status'), hostStatusText = $('host-status-text'),
-      hostError = $('host-error'), hostStart = $('host-start'), hostStop = $('host-stop'),
       hostViewers = $('host-viewers'), hostVideo = $('host-video'), hostCanvas = $('host-canvas'),
       toastEl = $('toast');
 
@@ -149,10 +154,10 @@
   function showScreen(name) {
     loginScreen.classList.toggle('hidden', name !== 'login');
     signupScreen.classList.toggle('hidden', name !== 'signup');
+    resetScreen.classList.toggle('hidden', name !== 'reset');
     tfaScreen.classList.toggle('hidden', name !== '2fa');
     settingsScreen.classList.toggle('hidden', name !== 'settings');
     homeScreen.classList.toggle('hidden', name !== 'home');
-    hostScreen.classList.toggle('hidden', name !== 'host');
     sessionScreen.classList.toggle('hidden', name !== 'session');
   }
 
@@ -183,6 +188,10 @@
     signupBtn.textContent = 'Create account';
     tfaBtn.disabled = false;
     tfaBtn.textContent = 'Verify';
+    resetSendBtn.disabled = false;
+    resetSendBtn.textContent = 'Send reset code';
+    resetConfirmBtn.disabled = false;
+    resetConfirmBtn.textContent = 'Set new password';
   }
 
   function isValidEmail(email) {
@@ -247,9 +256,10 @@
     } else if (wasAuthed) {
       showScreen('login');
       showLoginError('Disconnected from the server. Please sign in again.');
-    } else if (!tfaScreen.classList.contains('hidden') || !signupScreen.classList.contains('hidden')) {
-      // Socket died mid-signup or mid-2FA: send the user back to sign in.
+    } else if (!tfaScreen.classList.contains('hidden') || !signupScreen.classList.contains('hidden') || !resetScreen.classList.contains('hidden')) {
+      // Socket died mid-signup, mid-2FA or mid-reset: back to sign in.
       state.pendingUserId = null;
+      state.resetEmail = null;
       resetAuthButtons();
       showScreen('login');
       showLoginError('Lost connection to the server. Please try again.');
@@ -271,8 +281,33 @@
         refreshStatuses();
         break;
 
-      case 'need_2fa':
-        // Signed in OK, but the account wants a second-factor code.
+      case 'reset_sent':
+        // Server emailed a 6-digit code (or the email isn't registered —
+        // either way we show the same next step).
+        resetAuthButtons();
+        resetSentTo.textContent = state.resetEmail || '';
+        resetCode.value = '';
+        resetPass.value = '';
+        resetPass2.value = '';
+        resetError2.classList.add('hidden');
+        resetStepEmail.classList.add('hidden');
+        resetStepCode.classList.remove('hidden');
+        toast('Code sent — check your email 📧', 4000);
+        setTimeout(function () { try { resetCode.focus(); } catch (e) {} }, 80);
+        break;
+
+      case 'password_reset':
+        // New password is set. Back to sign-in with a clean slate.
+        closeSocket();
+        resetAuthButtons();
+        loginPass.value = '';
+        loginUser.value = state.resetEmail || loginUser.value;
+        state.resetEmail = null;
+        showScreen('login');
+        toast('Password changed! Sign in with your new password 🎉', 5000);
+        break;
+
+      case 'need_2fa':        // Signed in OK, but the account wants a second-factor code.
         state.connecting = false;
         state.pendingUserId = msg.userId || null;
         resetAuthButtons();
@@ -310,6 +345,19 @@
           tfaError.classList.remove('hidden');
           showScreen('login');
           showLoginError(errMsg);
+        } else if (!resetScreen.classList.contains('hidden')) {
+          // Forgot-password step failed: show the error on the visible step.
+          var onCodeStep = !resetStepCode.classList.contains('hidden');
+          var rTarget = onCodeStep ? resetError2 : resetError;
+          rTarget.textContent = errMsg;
+          rTarget.classList.remove('hidden');
+          if (onCodeStep) {
+            resetConfirmBtn.disabled = false;
+            resetConfirmBtn.textContent = 'Set new password';
+          } else {
+            resetSendBtn.disabled = false;
+            resetSendBtn.textContent = 'Send reset code';
+          }
         } else if (!signupScreen.classList.contains('hidden')) {
           signupError.textContent = errMsg;
           signupError.classList.remove('hidden');
@@ -530,6 +578,91 @@
   signupPass2.addEventListener('keydown', function (e) { if (e.key === 'Enter') doSignup(); });
   signupPass.addEventListener('keydown', function (e) { if (e.key === 'Enter') doSignup(); });
   signupEmail.addEventListener('keydown', function (e) { if (e.key === 'Enter') doSignup(); });
+
+  /* ---------------- Forgot password ---------------- */
+  function showResetError(el, msg) {
+    el.textContent = msg;
+    el.classList.remove('hidden');
+  }
+
+  function openReset() {
+    state.resetEmail = null;
+    resetEmail.value = (loginUser.value || '').trim();
+    resetError.classList.add('hidden');
+    resetError2.classList.add('hidden');
+    resetStepEmail.classList.remove('hidden');
+    resetStepCode.classList.add('hidden');
+    resetAuthButtons();
+    showScreen('reset');
+    setTimeout(function () { try { resetEmail.focus(); } catch (e) {} }, 80);
+  }
+
+  function doRequestReset() {
+    resetError.classList.add('hidden');
+    var email = resetEmail.value.trim().toLowerCase();
+    if (!email) { showResetError(resetError, 'Enter your email address.'); return; }
+    if (!isValidEmail(email)) { showResetError(resetError, 'That email address doesn\'t look right.'); return; }
+    state.resetEmail = email;
+    resetSendBtn.disabled = true;
+    resetSendBtn.textContent = 'Sending…';
+    connect(
+      function () { send({ type: 'request_reset', email: email }); },
+      function (err) {
+        resetSendBtn.disabled = false;
+        resetSendBtn.textContent = 'Send reset code';
+        showResetError(resetError, err);
+      }
+    );
+    // Server replies { type:'reset_sent' } or { type:'auth_error', message }.
+  }
+
+  function doConfirmReset() {
+    resetError2.classList.add('hidden');
+    var code = resetCode.value.replace(/\D/g, '');
+    var p1 = resetPass.value;
+    var p2 = resetPass2.value;
+    if (code.length !== 6) { showResetError(resetError2, 'Enter the 6-digit code from the email.'); return; }
+    if (p1.length < 8) { showResetError(resetError2, 'Password must be at least 8 characters.'); return; }
+    if (p1 !== p2) { showResetError(resetError2, 'Passwords don\'t match.'); return; }
+    resetConfirmBtn.disabled = true;
+    resetConfirmBtn.textContent = 'Setting…';
+    var payload = { type: 'reset_password', email: state.resetEmail, code: code, password: p1 };
+    if (!send(payload)) {
+      // Socket died while typing — reconnect and retry once.
+      connect(function () { send(payload); },
+        function (err) {
+          resetConfirmBtn.disabled = false;
+          resetConfirmBtn.textContent = 'Set new password';
+          showResetError(resetError2, err);
+        });
+    }
+    // Server replies { type:'password_reset' } or { type:'auth_error', message }.
+  }
+
+  gotoReset.addEventListener('click', function (e) {
+    e.preventDefault();
+    closeSocket();
+    openReset();
+  });
+  resetBack.addEventListener('click', function (e) {
+    e.preventDefault();
+    closeSocket();
+    state.resetEmail = null;
+    showScreen('login');
+  });
+  resetSendBtn.addEventListener('click', doRequestReset);
+  resetEmail.addEventListener('keydown', function (e) { if (e.key === 'Enter') doRequestReset(); });
+  resetConfirmBtn.addEventListener('click', doConfirmReset);
+  resetPass2.addEventListener('keydown', function (e) { if (e.key === 'Enter') doConfirmReset(); });
+  resetResend.addEventListener('click', function (e) {
+    e.preventDefault();
+    doRequestReset(); // server rate-limits resends per account
+  });
+  // Digits only; jump to the password field when the 6th digit lands.
+  resetCode.addEventListener('input', function () {
+    resetCode.value = resetCode.value.replace(/\D/g, '').slice(0, 6);
+    if (resetCode.value.length === 6) { try { resetPass.focus(); } catch (e) {} }
+  });
 
   /* ---------------- Switch between sign in / sign up ---------------- */
   gotoSignup.addEventListener('click', function (e) {
@@ -1288,244 +1421,6 @@
     reader.readAsArrayBuffer(f);
   }
 
-  /* ---------------- Browser host mode ("Share this PC") ----------------
-     No installs: this tab becomes the host. getDisplayMedia captures the
-     screen, a canvas loop JPEG-encodes frames, and a dedicated WebSocket
-     (separate from the control socket) registers + streams them through
-     the relay exactly like the Python agent. View-only by design:
-     browsers can share pixels but cannot move the OS mouse/keyboard. */
-  var LS_HOST_ID = 'ecfc_rd_host_id';
-  var LS_HOST_SECRET = 'ecfc_rd_host_secret';
-
-  var host = {
-    ws: null,
-    stream: null,
-    timer: null,
-    sharing: false,
-    viewers: 0,
-    computerId: null,
-    secret: null,
-  };
-
-  function hostRandomId() {
-    var chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // skip look-alikes 0/O/1/I
-    var s = '';
-    for (var i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)];
-    return s;
-  }
-
-  function hostRandomSecret() {
-    var chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    var s = '';
-    try {
-      var rnd = new Uint8Array(48);
-      crypto.getRandomValues(rnd);
-      for (var i = 0; i < rnd.length; i++) s += chars[rnd[i] % chars.length];
-    } catch (e) {
-      for (var j = 0; j < 48; j++) s += chars[Math.floor(Math.random() * chars.length)];
-    }
-    return s;
-  }
-
-  // Stable identity across sessions: the Computer ID never changes unless
-  // browser storage is cleared.
-  function hostIdentity() {
-    var id = null, secret = null;
-    try {
-      id = localStorage.getItem(LS_HOST_ID);
-      secret = localStorage.getItem(LS_HOST_SECRET);
-    } catch (e) {}
-    if (!/^[A-Z0-9]{6}$/.test(id || '')) {
-      id = hostRandomId();
-      try { localStorage.setItem(LS_HOST_ID, id); } catch (e) {}
-    }
-    if (!secret || secret.length < 16) {
-      secret = hostRandomSecret();
-      try { localStorage.setItem(LS_HOST_SECRET, secret); } catch (e) {}
-    }
-    host.computerId = id;
-    host.secret = secret;
-    return { id: id, secret: secret };
-  }
-
-  function hostShowError(msg) {
-    hostError.textContent = msg;
-    hostError.classList.remove('hidden');
-  }
-  function hostClearError() { hostError.classList.add('hidden'); }
-
-  function hostRenderStatus() {
-    if (host.sharing) {
-      hostStatus.classList.remove('idle');
-      hostStatus.classList.add('live');
-      hostStatusText.textContent = '🔴 LIVE — sharing as ' + host.computerId;
-      hostViewers.textContent = host.viewers === 1 ? '1 viewer watching' : host.viewers + ' viewers watching';
-    } else {
-      hostStatus.classList.add('idle');
-      hostStatus.classList.remove('live');
-      hostStatusText.textContent = 'Not sharing';
-      hostViewers.textContent = '';
-    }
-    hostStart.classList.toggle('hidden', host.sharing);
-    hostStop.classList.toggle('hidden', !host.sharing);
-  }
-
-  function hostSend(obj) {
-    if (host.ws && host.ws.readyState === WebSocket.OPEN) {
-      host.ws.send(JSON.stringify(obj));
-      return true;
-    }
-    return false;
-  }
-
-  sharePcBtn.addEventListener('click', function () {
-    hostClearError();
-    var ident = hostIdentity();
-    hostIdInput.value = ident.id;
-    if (!hostNameInput.value) hostNameInput.value = 'Shared PC';
-    hostRenderStatus();
-    showScreen('host');
-  });
-
-  hostBack.addEventListener('click', function () {
-    // Leaving the screen doesn't stop an active share — use Stop for that.
-    showScreen('home');
-  });
-
-  hostStart.addEventListener('click', function () {
-    hostClearError();
-    if (host.sharing) return;
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-      hostShowError("Screen sharing isn't supported in this browser — use Chrome or Edge on a computer.");
-      return;
-    }
-    hostIdentity();
-    hostIdInput.value = host.computerId;
-    hostStart.disabled = true;
-    hostStart.textContent = 'Starting…';
-
-    var ws;
-    try { ws = new WebSocket(serverURL()); }
-    catch (e) {
-      hostStart.disabled = false;
-      hostStart.textContent = '▶ Start sharing';
-      hostShowError('Could not reach the server.');
-      return;
-    }
-    host.ws = ws;
-    ws.onopen = function () {
-      // Same register shape the Python host uses, plus the view-only flag.
-      hostSend({
-        type: 'register',
-        computerId: host.computerId,
-        name: (hostNameInput.value.trim() || 'Shared PC').slice(0, 40),
-        pairingSecret: host.secret,
-        viewOnly: true,
-      });
-      // Now ask for the screen.
-      navigator.mediaDevices.getDisplayMedia({ video: true }).then(function (stream) {
-        host.stream = stream;
-        hostVideo.srcObject = stream;
-        var p = hostVideo.play();
-        if (p && p.catch) p.catch(function () {});
-        // User clicked "Stop sharing" in the browser chrome → clean up too.
-        var track = stream.getVideoTracks()[0];
-        if (track) track.addEventListener('ended', function () { stopSharing('Screen sharing was stopped.'); });
-      }).catch(function (err) {
-        var why = (err && err.name === 'NotAllowedError') ? ' — please allow it in the picker.' : '';
-        hostShowError('Could not capture the screen' + why + ' Try again.');
-        stopSharing(); // silent: unregisters the half-started share
-      });
-    };
-    ws.onmessage = function (ev) {
-      var msg;
-      try { msg = JSON.parse(ev.data); } catch (e) { return; }
-      handleHostMessage(msg);
-    };
-    ws.onclose = function () {
-      host.ws = null;
-      if (host.sharing) stopSharing('Connection to the server was lost.');
-      else { hostStart.disabled = false; hostStart.textContent = '▶ Start sharing'; }
-    };
-    ws.onerror = function () { /* onclose follows with details */ };
-  });
-
-  function handleHostMessage(msg) {
-    switch (msg.type) {
-      case 'registered':
-        host.sharing = true;
-        host.viewers = 0;
-        hostRenderStatus();
-        hostStart.disabled = false;
-        hostStart.textContent = '▶ Start sharing';
-        // Capture loop (~8 FPS is plenty for view-only).
-        if (host.timer) clearInterval(host.timer);
-        host.timer = setInterval(hostCaptureFrame, 120);
-        toast('🖥️ Sharing live as ' + msg.computerId);
-        break;
-      case 'client_connected':
-        host.viewers++;
-        hostRenderStatus();
-        break;
-      case 'client_disconnected':
-        host.viewers = Math.max(0, host.viewers - 1);
-        hostRenderStatus();
-        break;
-      case 'error':
-        hostShowError(msg.message || 'The server refused the share.');
-        stopSharing();
-        break;
-      // View-only: the server may relay viewer input / file messages —
-      // a browser tab cannot act on them, so ignore gracefully.
-      case 'input':
-        console.log('[host] view-only: ignoring input from a viewer');
-        break;
-      case 'file_start': case 'file_chunk': case 'file_end':
-      case 'file_get_list': case 'file_dl': case 'file_delete': case 'file_rename':
-        console.log('[host] view-only: ignoring file message (' + msg.type + ')');
-        break;
-      default:
-        break;
-    }
-  }
-
-  function hostCaptureFrame() {
-    if (!host.sharing || !hostVideo.videoWidth) return;
-    try {
-      var scale = Math.min(1, 1280 / hostVideo.videoWidth);
-      var w = Math.max(2, Math.round(hostVideo.videoWidth * scale));
-      var h = Math.max(2, Math.round(hostVideo.videoHeight * scale));
-      if (hostCanvas.width !== w || hostCanvas.height !== h) {
-        hostCanvas.width = w;
-        hostCanvas.height = h;
-      }
-      var ctx = hostCanvas.getContext('2d');
-      ctx.drawImage(hostVideo, 0, 0, w, h);
-      var b64 = hostCanvas.toDataURL('image/jpeg', 0.65).split(',')[1] || '';
-      if (b64) hostSend({ type: 'frame', data: b64 });
-    } catch (e) { /* one bad frame must never kill the share */ }
-  }
-
-  function stopSharing(notice) {
-    if (host.timer) { clearInterval(host.timer); host.timer = null; }
-    if (host.stream) {
-      try { host.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
-      host.stream = null;
-    }
-    try { hostVideo.pause(); hostVideo.removeAttribute('src'); hostVideo.srcObject = null; } catch (e) {}
-    if (host.ws && host.ws.readyState === WebSocket.OPEN) {
-      try { host.ws.send(JSON.stringify({ type: 'bye' })); } catch (e) {}
-    }
-    if (host.ws) { try { host.ws.close(); } catch (e) {} host.ws = null; }
-    host.sharing = false;
-    host.viewers = 0;
-    hostRenderStatus();
-    hostStart.disabled = false;
-    hostStart.textContent = '▶ Start sharing';
-    if (notice) toast(notice, 4000);
-  }
-
-  hostStop.addEventListener('click', function () { stopSharing('Stopped sharing.'); });
 
   /* ---------------- Fit-to-screen toggle ---------------- */
   function setFitMode(fit) {

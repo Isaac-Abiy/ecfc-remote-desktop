@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<link rel="icon" href="/logo.jpg">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="theme-color" content="#0b0f1a">
@@ -54,7 +55,46 @@
 
     <div id="login-error" class="error hidden"></div>
     <button id="login-btn" class="btn primary btn-block">Sign in</button>
+    <p class="center muted small auth-switch"><a href="#" id="goto-reset">Forgot password?</a></p>
     <p class="center muted small auth-switch">Don't have an account? <a href="#" id="goto-signup">Sign up</a></p>
+  </div>
+</section>
+
+<!-- ============ FORGOT PASSWORD ============ -->
+<section id="screen-reset" class="screen hidden">
+  <div class="card login-card">
+    <h1>Reset password</h1>
+    <p class="muted">We'll email you a 6-digit code</p>
+
+    <div id="reset-step-email">
+      <label class="field">
+        <span>Email</span>
+        <input id="reset-email" type="email" autocomplete="email" placeholder="you@example.com">
+      </label>
+      <div id="reset-error" class="error hidden"></div>
+      <button id="reset-send-btn" class="btn primary btn-block">Send reset code</button>
+    </div>
+
+    <div id="reset-step-code" class="hidden">
+      <p class="muted small">Enter the 6-digit code we sent to <b id="reset-sent-to"></b></p>
+      <label class="field">
+        <span>Code</span>
+        <input id="reset-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456">
+      </label>
+      <label class="field">
+        <span>New password</span>
+        <input id="reset-pass" type="password" autocomplete="new-password" placeholder="At least 8 characters">
+      </label>
+      <label class="field">
+        <span>Confirm new password</span>
+        <input id="reset-pass2" type="password" autocomplete="new-password" placeholder="Type it again">
+      </label>
+      <div id="reset-error2" class="error hidden"></div>
+      <button id="reset-confirm-btn" class="btn primary btn-block">Set new password</button>
+      <p class="center muted small auth-switch"><a href="#" id="reset-resend">Didn't get the code? Send again</a></p>
+    </div>
+
+    <p class="center muted small auth-switch"><a href="#" id="reset-back">← Back to sign in</a></p>
   </div>
 </section>
 
@@ -157,11 +197,6 @@
     <div id="computer-list" class="computer-list"></div>
     <p id="empty-hint" class="muted center hidden">No computers yet — add one above to get started.</p>
 
-    <div class="card">
-      <h2>🖥️ Share this PC</h2>
-      <p class="muted small">No installs — share this computer's screen straight from the browser. <b>View-only:</b> viewers can watch, but can't control it.</p>
-      <button id="share-pc-btn" class="btn primary btn-block">Share this PC</button>
-    </div>
   </main>
 </section>
 
@@ -215,45 +250,6 @@
   </main>
 </section>
 
-<!-- ============ BROWSER HOST ("Share this PC") ============ -->
-<section id="screen-host" class="screen hidden">
-  <header class="topbar">
-    <button id="host-back" class="btn ghost small">← Back</button>
-    <div class="brand"><span>🖥️ Share this PC</span></div>
-  </header>
-
-  <main class="home-main">
-    <div class="card">
-      <h2>Share this screen</h2>
-      <p class="muted small">No installs needed. <b>View-only mode</b> — browsers can share the screen but can't control the PC.</p>
-
-      <label class="field">
-        <span>Computer name</span>
-        <input id="host-name" type="text" maxlength="40" placeholder="Shared PC" autocomplete="off" spellcheck="false">
-      </label>
-      <label class="field">
-        <span>Computer ID <span class="muted">— viewers add this ID on their home screen</span></span>
-        <input id="host-id" type="text" readonly tabindex="-1" class="code-input" placeholder="------">
-      </label>
-
-      <div id="host-status" class="host-status idle">
-        <span class="live-dot"></span><span id="host-status-text">Not sharing</span>
-      </div>
-      <div id="host-error" class="error hidden"></div>
-
-      <div class="row-btns">
-        <button id="host-start" class="btn primary">▶ Start sharing</button>
-        <button id="host-stop" class="btn danger hidden">⏹ Stop sharing</button>
-      </div>
-      <p id="host-viewers" class="muted small center"></p>
-      <p class="muted small">Keep this tab open while sharing. In the browser picker, choose <b>“Entire screen”</b> for the full desktop.</p>
-    </div>
-  </main>
-
-  <!-- Hidden capture elements -->
-  <video id="host-video" class="hidden" muted playsinline></video>
-  <canvas id="host-canvas" class="hidden"></canvas>
-</section>
 
 <!-- ============ SESSION ============ -->
 <section id="screen-session" class="screen hidden">
