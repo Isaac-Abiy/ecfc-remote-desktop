@@ -11,6 +11,8 @@
  *     { type: 'setup_2fa' }                              -> { type:'2fa_secret', secret, qr_url }
  *     { type: 'enable_2fa', token }                      -> { type:'2fa_enabled' } | { type:'auth_error', message }
  *     { type: 'disable_2fa', password }                  -> { type:'2fa_disabled' } | { type:'auth_error', message }
+ *     { type: 'change_password', currentPassword, newPassword }
+ *                                                       -> { type:'password_changed' } | { type:'auth_error', message }
  *     { type: 'status', computerId }                    -> { type:'status', computerId, online }
  *     { type: 'connect', computerId }                  -> { type:'connected', computerId }
  *                                                        |  { type:'busy' } | { type:'host_offline' }
@@ -130,6 +132,8 @@
       tfaConfirmBtn = $('tfa-confirm-btn'), tfaDisableBtn = $('tfa-disable-btn'),
       tfaDisablePass = $('tfa-disable-pass'), tfaDisableError = $('tfa-disable-error'),
       tfaDisableCancel = $('tfa-disable-cancel'), tfaDisableConfirm = $('tfa-disable-confirm'),
+      pwCur = $('pwcur'), pwNew = $('pwnew'), pwNew2 = $('pwnew2'),
+      pwChangeError = $('pwchange-error'), pwChangeBtn = $('pwchange-btn'),
       homeUser = $('home-user'), logoutBtn = $('logout-btn'),
       addId = $('add-id'), addBtn = $('add-btn'), addError = $('add-error'),
       computerList = $('computer-list'), emptyHint = $('empty-hint'), refreshBtn = $('refresh-btn'),
@@ -307,6 +311,18 @@
         toast('Password changed! Sign in with your new password 🎉', 5000);
         break;
 
+      case 'password_changed':
+        // Password changed from Settings — the session stays signed in.
+        state.changingPassword = false;
+        pwChangeBtn.disabled = false;
+        pwChangeBtn.textContent = 'Change password';
+        pwCur.value = '';
+        pwNew.value = '';
+        pwNew2.value = '';
+        pwChangeError.classList.add('hidden');
+        toast('Password changed! 🎉', 4000);
+        break;
+
       case 'need_2fa':        // Signed in OK, but the account wants a second-factor code.
         state.connecting = false;
         state.pendingUserId = msg.userId || null;
@@ -324,19 +340,25 @@
         var errMsg = msg.message || 'Authentication failed. Check your details and try again.';
         // Route the error to whichever auth surface is visible.
         if (!settingsScreen.classList.contains('hidden')) {
-          // 2FA enable/disable failed inside Settings.
+          // 2FA enable/disable or password change failed inside Settings.
           tfaConfirmBtn.disabled = false;
           tfaConfirmBtn.textContent = 'Confirm & enable';
           tfaDisableConfirm.disabled = false;
           tfaDisableConfirm.textContent = 'Disable 2FA';
           tfaEnableBtn.disabled = false;
           tfaEnableBtn.textContent = 'Enable 2FA';
+          pwChangeBtn.disabled = false;
+          pwChangeBtn.textContent = 'Change password';
           if (!tfaQrView.classList.contains('hidden')) {
             tfaSetupError.textContent = errMsg;
             tfaSetupError.classList.remove('hidden');
           } else if (!tfaDisableView.classList.contains('hidden')) {
             tfaDisableError.textContent = errMsg;
             tfaDisableError.classList.remove('hidden');
+          } else if (state.changingPassword) {
+            state.changingPassword = false;
+            pwChangeError.textContent = errMsg;
+            pwChangeError.classList.remove('hidden');
           } else {
             toast(errMsg, 4000);
           }
@@ -733,6 +755,14 @@
     tfaQrView.classList.add('hidden');
     tfaEnabledView.classList.toggle('hidden', !state.tfaEnabled);
     tfaDisableView.classList.add('hidden');
+    // Fresh change-password form every time Settings opens.
+    pwCur.value = '';
+    pwNew.value = '';
+    pwNew2.value = '';
+    pwChangeError.classList.add('hidden');
+    pwChangeBtn.disabled = false;
+    pwChangeBtn.textContent = 'Change password';
+    state.changingPassword = false;
   }
 
   // Step 1: ask the server for a fresh TOTP secret.
@@ -827,6 +857,40 @@
   }
   tfaDisableConfirm.addEventListener('click', doDisable2fa);
   tfaDisablePass.addEventListener('keydown', function (e) { if (e.key === 'Enter') doDisable2fa(); });
+
+  /* ---------------- Settings: change password ---------------- */
+  function showPwChangeError(m) {
+    pwChangeError.textContent = m;
+    pwChangeError.classList.remove('hidden');
+  }
+  function doChangePassword() {
+    var cur = pwCur.value, nw = pwNew.value, nw2 = pwNew2.value;
+    pwChangeError.classList.add('hidden');
+    if (!cur) {
+      showPwChangeError('Enter your current password.');
+      return;
+    }
+    if (nw.length < 8) {
+      showPwChangeError('New password must be at least 8 characters.');
+      return;
+    }
+    if (nw !== nw2) {
+      showPwChangeError('The new passwords don\'t match.');
+      return;
+    }
+    state.changingPassword = true;
+    pwChangeBtn.disabled = true;
+    pwChangeBtn.textContent = 'Changing…';
+    if (!send({ type: 'change_password', currentPassword: cur, newPassword: nw })) {
+      state.changingPassword = false;
+      pwChangeBtn.disabled = false;
+      pwChangeBtn.textContent = 'Change password';
+      toast('Not connected to the server.');
+    }
+    // Server replies { type:'password_changed' } or { type:'auth_error', message }.
+  }
+  pwChangeBtn.addEventListener('click', doChangePassword);
+  pwNew2.addEventListener('keydown', function (e) { if (e.key === 'Enter') doChangePassword(); });
 
   /* ---------------- Home: computer list ---------------- */
   function renderComputers() {

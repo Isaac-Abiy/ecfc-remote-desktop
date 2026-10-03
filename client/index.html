@@ -247,6 +247,25 @@
         </div>
       </div>
     </div>
+
+    <div class="card">
+      <h2>Change password</h2>
+      <p class="muted small">Enter your current password, then choose a new one.</p>
+      <label class="field">
+        <span>Current password</span>
+        <input id="pwcur" type="password" autocomplete="current-password" placeholder="••••••••">
+      </label>
+      <label class="field">
+        <span>New password</span>
+        <input id="pwnew" type="password" autocomplete="new-password" placeholder="At least 8 characters">
+      </label>
+      <label class="field">
+        <span>Confirm new password</span>
+        <input id="pwnew2" type="password" autocomplete="new-password" placeholder="Repeat the new password">
+      </label>
+      <div id="pwchange-error" class="error hidden"></div>
+      <button id="pwchange-btn" class="btn primary">Change password</button>
+    </div>
   </main>
 </section>
 

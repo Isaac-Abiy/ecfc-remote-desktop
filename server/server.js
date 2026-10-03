@@ -867,6 +867,46 @@ async function handleClientMessage(clientState, msg) {
       break;
     }
 
+    // Change password while signed in:
+    // { type:'change_password', currentPassword, newPassword }
+    case 'change_password': {
+      if (!dbReady) {
+        send(ws, { type: 'auth_error', message: 'Server database not configured' });
+        return;
+      }
+      const currentPassword = String(msg.currentPassword || '');
+      const newPassword = String(msg.newPassword || '');
+      if (newPassword.length < 8) {
+        send(ws, { type: 'auth_error', message: 'New password must be at least 8 characters' });
+        return;
+      }
+      try {
+        const { data: user, error } = await supabase
+          .from('rd_users')
+          .select('pass_hash')
+          .eq('id', clientState.userId)
+          .single();
+        if (error) throw error;
+        const ok = await bcrypt.compare(currentPassword, user.pass_hash);
+        if (!ok) {
+          send(ws, { type: 'auth_error', message: 'Wrong current password — password not changed' });
+          return;
+        }
+        const passHash = await bcrypt.hash(newPassword, 10);
+        const { error: updErr } = await supabase
+          .from('rd_users')
+          .update({ pass_hash: passHash })
+          .eq('id', clientState.userId);
+        if (updErr) throw updErr;
+        log(`client-auth: password changed for '${clientState.email}'`);
+        send(ws, { type: 'password_changed' });
+      } catch (e) {
+        log('db: change_password failed:', e.message);
+        send(ws, { type: 'auth_error', message: 'Could not change password — try again' });
+      }
+      break;
+    }
+
     default:
       // Unknown client message types are ignored (forward-compat).
       break;
