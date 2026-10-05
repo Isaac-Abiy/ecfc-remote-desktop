@@ -217,6 +217,7 @@
       try { state.ws.close(); } catch (e) {}
       state.ws = null;
     }
+    if (state.keepaliveTimer) { clearInterval(state.keepaliveTimer); state.keepaliveTimer = null; }
     state.authed = false;
   }
 
@@ -234,6 +235,13 @@
     var opened = false;
     ws.onopen = function () {
       opened = true;
+      // Keepalive: proxies (Render's included) kill silent WebSockets after
+      // ~60-120s, which used to sign everyone out after ~2 idle minutes.
+      // A tiny ping every 25s keeps the connection — and the login — alive.
+      if (state.keepaliveTimer) clearInterval(state.keepaliveTimer);
+      state.keepaliveTimer = setInterval(function () {
+        send({ type: 'ping', t: Date.now() });
+      }, 25000);
       onOpen && onOpen();
     };
     ws.onmessage = function (ev) {
