@@ -495,7 +495,8 @@ async function handleClientMessage(clientState, msg) {
       clientState.userId = data.id;
       clientState.email = email;
       log(`client-signup OK: '${email}'`);
-      send(ws, { type: 'auth_ok', userId: data.id });
+      const token = await issueAuthToken(data.id);
+      send(ws, { type: 'auth_ok', userId: data.id, email, token });
     } catch (e) {
       log('db: signup failed:', e.message);
       send(ws, { type: 'auth_error', message: 'Signup failed — try again' });
