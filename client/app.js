@@ -965,6 +965,7 @@
         '</div>' +
         '<div class="pc-actions">' +
           '<button class="btn primary small connect-btn">Connect</button>' +
+          '<button class="btn ghost small rename-btn" title="Rename">✏️</button>' +
           '<button class="btn ghost small remove-btn" title="Remove">✕</button>' +
         '</div>';
 
@@ -975,6 +976,18 @@
       var connectBtn = card.querySelector('.connect-btn');
       connectBtn.disabled = online !== true;
       connectBtn.addEventListener('click', function () { connectComputer(pc.id); });
+
+      card.querySelector('.rename-btn').addEventListener('click', function () {
+        var newName = prompt('Rename this computer:', pc.name);
+        if (newName === null) return; // cancelled
+        newName = newName.trim().replace(/\s+/g, ' ');
+        if (!newName) { toast("Name can't be empty."); return; }
+        if (newName.length > 40) newName = newName.slice(0, 40);
+        pc.name = newName;
+        saveComputers(state.computers);
+        renderComputers();
+        toast('Renamed to "' + newName + '" ✏️');
+      });
 
       card.querySelector('.remove-btn').addEventListener('click', function () {
         if (!confirm('Remove ' + pc.id + ' from your list?')) return;
