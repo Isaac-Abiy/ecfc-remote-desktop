@@ -54,15 +54,25 @@ create table if not exists rd_password_resets (
   created_at timestamptz not null default now()
 );
 
+create table if not exists rd_auth_tokens (
+  id         uuid        primary key default gen_random_uuid(),
+  user_id    uuid        not null references rd_users(id) on delete cascade,
+  token_hash text        not null,                 -- SHA-256 of the 64-hex-char token
+  expires_at timestamptz not null,                -- created_at + 1 year (sliding)
+  created_at timestamptz not null default now()
+);
+
 -- RLS on everything (no policies = locked down for anon/authenticated keys;
 -- the server's service-role key bypasses RLS).
 alter table rd_users     enable row level security;
 alter table rd_computers enable row level security;
 alter table rd_sessions  enable row level security;
 alter table rd_password_resets enable row level security;
+alter table rd_auth_tokens enable row level security;
 
 -- Indexes for the lookups the server does on every auth/pair/status call.
 create index if not exists rd_users_email_idx        on rd_users (email);
 create index if not exists rd_computers_computer_id_idx on rd_computers (computer_id);
 create index if not exists rd_sessions_user_id_idx   on rd_sessions (user_id);
 create index if not exists rd_password_resets_user_idx on rd_password_resets (user_id);
+create index if not exists rd_auth_tokens_hash_idx   on rd_auth_tokens (token_hash);

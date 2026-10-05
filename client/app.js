@@ -59,6 +59,7 @@
   var LS_COMPUTERS = 'ecfc_rd_computers';
   var LS_SERVER = 'ecfc_rd_server';
   var LS_USER = 'ecfc_rd_user';
+  var LS_TOKEN = 'ecfc_rd_token'; // persistent login token (see auth_token)
 
   function serverURL() {
     // Server field is locked in the UI — always use the built-in URL so a
@@ -86,6 +87,7 @@
     pendingUserId: null,     // set when server asks for a 2FA code at sign-in
     resetEmail: null,        // email typed into the forgot-password flow
     resetReconnectTries: 0,  // auto-reconnect attempts after a mid-reset drop
+    silentAuth: false,       // true while a remembered token is signing in
     tfaEnabled: false,       // whether the signed-in account has 2FA on
     computers: loadComputers(),   // [{ id, name }]
     statuses: {},                // computerId -> true/false/null(unknown)
@@ -264,6 +266,7 @@
   function onSocketDropped() {
     var wasAuthed = state.authed;
     state.authed = false;
+    if (state.silentAuth) { silentAuthFailed(); return; }
     if (state.session) {
       endSession('Connection to the server was lost.');
     } else if (wasAuthed) {
@@ -316,8 +319,11 @@
       case 'auth_ok':
         state.authed = true;
         state.connecting = false;
+        state.silentAuth = false;
         state.pendingUserId = null;
         state.tfaEnabled = !!msg.tfa_enabled;
+        if (msg.email) { state.email = msg.email; state.username = msg.email; }
+        if (msg.token) { try { localStorage.setItem(LS_TOKEN, msg.token); } catch (e) {} }
         resetAuthButtons();
         homeUser.textContent = state.email || state.username;
         showScreen('home');
@@ -378,6 +384,7 @@
         state.connecting = false;
         state.pendingUserId = null;
         resetAuthButtons();
+        if (state.silentAuth) { silentAuthFailed(); break; }
         var errMsg = msg.message || 'Authentication failed. Check your details and try again.';
         // Route the error to whichever auth surface is visible.
         if (!settingsScreen.classList.contains('hidden')) {
@@ -604,7 +611,10 @@
 
   logoutBtn.addEventListener('click', function () {
     closeSocket();
+    try { localStorage.removeItem(LS_TOKEN); } catch (e) {}
     loginPass.value = '';
+    state.email = '';
+    state.username = '';
     state.tfaEnabled = false;
     showScreen('login');
   });
@@ -1560,6 +1570,33 @@
   fitBtn.addEventListener('click', function () { setFitMode(!state.fitMode); });
 
   /* ---------------- Boot ---------------- */
+  function silentAuthFailed() {
+    state.silentAuth = false;
+    state.connecting = false;
+    try { localStorage.removeItem(LS_TOKEN); } catch (e) {}
+    resetAuthButtons();
+    showScreen('login');
+    loginUser.focus();
+  }
+  function trySilentAuth() {
+    // Returning visit with a remembered session: sign straight back in —
+    // a refresh should never log anyone out.
+    var token = null;
+    try { token = localStorage.getItem(LS_TOKEN); } catch (e) {}
+    if (!token) { showScreen('login'); loginUser.focus(); return; }
+    var savedUser = null;
+    try { savedUser = localStorage.getItem(LS_USER); } catch (e) {}
+    if (savedUser) { state.email = savedUser; state.username = savedUser; }
+    state.silentAuth = true;
+    state.connecting = true;
+    showScreen('login');
+    loginBtn.disabled = true;
+    loginBtn.textContent = 'Signing you in…';
+    connect(
+      function () { send({ type: 'auth_token', token: token }); },
+      function () { silentAuthFailed(); }
+    );
+  }
   function boot() {
     loginServer.value = serverURL();
     signupServer.value = serverURL();
@@ -1569,8 +1606,7 @@
       splash.classList.add('fade');
       setTimeout(function () {
         splash.style.display = 'none';
-        showScreen('login');
-        loginUser.focus();
+        trySilentAuth();
       }, 450);
     }, 900);
   }

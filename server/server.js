@@ -126,6 +126,29 @@ function randResetCode() {
   return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
 }
 
+// Persistent login ("remember me") tokens: issued after a full sign-in
+// (password, plus 2FA when enabled), stored as SHA-256 hashes so a DB leak
+// never exposes a usable token. Long-lived so a refresh never logs anyone
+// out; revoked automatically on any password change/reset.
+const AUTH_TOKEN_TTL_MS = 365 * 24 * 3600 * 1000; // 1 year
+function randAuthToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+async function issueAuthToken(userId) {
+  const token = randAuthToken();
+  const { error } = await supabase.from('rd_auth_tokens').insert({
+    user_id: userId,
+    token_hash: sha256Hex(token),
+    expires_at: new Date(Date.now() + AUTH_TOKEN_TTL_MS).toISOString(),
+  });
+  if (error) throw error;
+  return token;
+}
+async function revokeAuthTokens(userId) {
+  const { error } = await supabase.from('rd_auth_tokens').delete().eq('user_id', userId);
+  if (error) log('db: revoke auth tokens failed:', error.message);
+}
+
 // Send the reset code through the MyDesk MCP Gmail API (JSON-RPC tools/call).
 // Throws on any failure; callers log it and still answer the client the same
 // way so a mail hiccup never reveals account/config state.
@@ -482,6 +505,54 @@ async function handleClientMessage(clientState, msg) {
 
   // Step 1 — sign in: { type:'auth', email, password }
   // (also accepts 'username' for the old MVP client)
+  // Resume a remembered session: { type:'auth_token', token }.
+  // The token is only ever issued after a full password (+2FA) sign-in.
+  if (msg.type === 'auth_token') {
+    if (!dbReady) {
+      send(ws, { type: 'auth_error', message: 'Server database not configured' });
+      return;
+    }
+    const token = String(msg.token || '').trim();
+    try {
+      let user = null;
+      if (/^[0-9a-f]{64}$/i.test(token)) {
+        const { data: row, error } = await supabase
+          .from('rd_auth_tokens')
+          .select('user_id, expires_at')
+          .eq('token_hash', sha256Hex(token.toLowerCase()))
+          .maybeSingle();
+        if (error) throw error;
+        if (row && new Date(row.expires_at) > new Date()) {
+          const { data: u, error: uErr } = await supabase
+            .from('rd_users')
+            .select('id, email')
+            .eq('id', row.user_id)
+            .maybeSingle();
+          if (uErr) throw uErr;
+          user = u;
+        }
+      }
+      if (!user) {
+        send(ws, { type: 'auth_error', message: 'Session expired — please sign in again' });
+        return;
+      }
+      // Sliding expiry: each successful resume extends the session.
+      await supabase
+        .from('rd_auth_tokens')
+        .update({ expires_at: new Date(Date.now() + AUTH_TOKEN_TTL_MS).toISOString() })
+        .eq('token_hash', sha256Hex(token.toLowerCase()));
+      clientState.authed = true;
+      clientState.userId = user.id;
+      clientState.email = user.email;
+      log(`client-auth OK (token): '${user.email}'`);
+      send(ws, { type: 'auth_ok', userId: user.id, email: user.email });
+    } catch (e) {
+      log('db: auth_token failed:', e.message);
+      send(ws, { type: 'auth_error', message: 'Sign-in failed — try again' });
+    }
+    return;
+  }
+
   if (msg.type === 'auth') {
     if (!dbReady) {
       send(ws, { type: 'auth_error', message: 'Server database not configured' });
@@ -513,7 +584,8 @@ async function handleClientMessage(clientState, msg) {
       clientState.userId = user.id;
       clientState.email = user.email;
       log(`client-auth OK: '${user.email}'`);
-      send(ws, { type: 'auth_ok', userId: user.id });
+      const token = await issueAuthToken(user.id);
+      send(ws, { type: 'auth_ok', userId: user.id, email: user.email, token });
     } catch (e) {
       log('db: auth failed:', e.message);
       send(ws, { type: 'auth_error', message: 'Sign-in failed — try again' });
@@ -552,7 +624,8 @@ async function handleClientMessage(clientState, msg) {
       clientState.userId = user.id;
       clientState.email = user.email;
       log(`client-2fa OK: '${user.email}'`);
-      send(ws, { type: 'auth_ok', userId: user.id });
+      const token = await issueAuthToken(user.id);
+      send(ws, { type: 'auth_ok', userId: user.id, email: user.email, token });
     } catch (e) {
       log('db: verify_2fa failed:', e.message);
       send(ws, { type: 'auth_error', message: 'Verification failed — try again' });
@@ -673,6 +746,7 @@ async function handleClientMessage(clientState, msg) {
               .update({ used: true })
               .eq('id', row.id);
             ok = true;
+            await revokeAuthTokens(user.id); // password reset kills old sessions
           } else {
             // Wrong guess: count it so brute-forcing dies after a few tries.
             await supabase
@@ -899,6 +973,7 @@ async function handleClientMessage(clientState, msg) {
           .eq('id', clientState.userId);
         if (updErr) throw updErr;
         log(`client-auth: password changed for '${clientState.email}'`);
+        await revokeAuthTokens(clientState.userId); // old remembered sessions die
         send(ws, { type: 'password_changed' });
       } catch (e) {
         log('db: change_password failed:', e.message);
@@ -962,7 +1037,7 @@ wss.on('connection', (ws) => {
           log('host handler error:', e.message);
           send(ws, { type: 'error', message: 'server error, try again' });
         });
-      } else if (msg.type === 'auth' || msg.type === 'signup' || msg.type === 'verify_2fa' || msg.type === 'request_reset' || msg.type === 'reset_password' || msg.type === 'ping') {
+      } else if (msg.type === 'auth' || msg.type === 'auth_token' || msg.type === 'signup' || msg.type === 'verify_2fa' || msg.type === 'request_reset' || msg.type === 'reset_password' || msg.type === 'ping') {
         peer.kind = 'client';
         await handleClientMessage(peer.clientState, msg).catch((e) => {
           log('client handler error:', e.message);
