@@ -44,7 +44,7 @@ const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 // Forgot-password: reset codes are 6 digits, good for 15 minutes, single-use.
 // Email goes out through Isaac's MyDesk MCP Gmail API (key kept server-side).
 const RESET_CODE_TTL_MS = 15 * 60 * 1000;
-const RESET_MAX_PER_HOUR = 5;  // codes per account per hour (rate limit)
+const RESET_MAX_PER_HOUR = 10; // codes per account per hour (rate limit)
 const RESET_MAX_ATTEMPTS = 5;  // wrong-code guesses before a code dies
 const MYDESK_API_KEY = process.env.MYDESK_API_KEY || '';
 const MYDESK_MCP_URL = process.env.MYDESK_MCP_URL ||
