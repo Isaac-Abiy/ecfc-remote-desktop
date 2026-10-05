@@ -85,6 +85,7 @@
     email: '',
     pendingUserId: null,     // set when server asks for a 2FA code at sign-in
     resetEmail: null,        // email typed into the forgot-password flow
+    resetReconnectTries: 0,  // auto-reconnect attempts after a mid-reset drop
     tfaEnabled: false,       // whether the signed-in account has 2FA on
     computers: loadComputers(),   // [{ id, name }]
     statuses: {},                // computerId -> true/false/null(unknown)
@@ -268,14 +269,45 @@
     } else if (wasAuthed) {
       showScreen('login');
       showLoginError('Disconnected from the server. Please sign in again.');
-    } else if (!tfaScreen.classList.contains('hidden') || !signupScreen.classList.contains('hidden') || !resetScreen.classList.contains('hidden')) {
-      // Socket died mid-signup, mid-2FA or mid-reset: back to sign in.
+    } else if (!tfaScreen.classList.contains('hidden') || !signupScreen.classList.contains('hidden')) {
+      // Socket died mid-signup or mid-2FA: back to sign in.
       state.pendingUserId = null;
-      state.resetEmail = null;
       resetAuthButtons();
       showScreen('login');
       showLoginError('Lost connection to the server. Please try again.');
+    } else if (!resetScreen.classList.contains('hidden')) {
+      resetSocketDropped();
     }
+  }
+
+  function resetSocketDropped() {
+    // The socket died while the forgot-password screen was up. The classic
+    // case: dad taps "Send reset code", switches to his email app to copy
+    // the 6-digit code, and the phone kills the background tab's socket.
+    // Don't nuke his progress — stay on the reset screen, keep the email,
+    // and quietly reconnect so he can carry on where he left off.
+    var onCodeStep = !resetStepCode.classList.contains('hidden');
+    var rTarget = onCodeStep ? resetError2 : resetError;
+    if (state.resetReconnectTries >= 3) {
+      state.resetReconnectTries = 0;
+      rTarget.textContent = 'Connection lost. Check your internet, then tap ' +
+        (onCodeStep ? '"Resend code"' : '"Send reset code"') + ' to try again.';
+      rTarget.classList.remove('hidden');
+      resetAuthButtons();
+      return;
+    }
+    state.resetReconnectTries++;
+    rTarget.textContent = 'Reconnecting…';
+    rTarget.classList.remove('hidden');
+    setTimeout(function () {
+      if (resetScreen.classList.contains('hidden')) return; // moved on already
+      connect(function () {
+        state.resetReconnectTries = 0;
+        resetError.classList.add('hidden');
+        resetError2.classList.add('hidden');
+        resetAuthButtons();
+      }, function () { resetSocketDropped(); });
+    }, 1500);
   }
 
   /* ---------------- Incoming messages ---------------- */
@@ -296,6 +328,7 @@
       case 'reset_sent':
         // Server emailed a 6-digit code (or the email isn't registered —
         // either way we show the same next step).
+        state.resetReconnectTries = 0;
         resetAuthButtons();
         resetSentTo.textContent = state.resetEmail || '';
         resetCode.value = '';
@@ -617,6 +650,7 @@
 
   function openReset() {
     state.resetEmail = null;
+    state.resetReconnectTries = 0;
     resetEmail.value = (loginUser.value || '').trim();
     resetError.classList.add('hidden');
     resetError2.classList.add('hidden');
@@ -684,6 +718,15 @@
   resetEmail.addEventListener('keydown', function (e) { if (e.key === 'Enter') doRequestReset(); });
   resetConfirmBtn.addEventListener('click', doConfirmReset);
   resetPass2.addEventListener('keydown', function (e) { if (e.key === 'Enter') doConfirmReset(); });
+  // Safety net: when the tab comes back to the foreground mid-reset with a
+  // dead or missing socket (phone killed it while dad was in his email app),
+  // run the same gentle reconnect instead of waiting for a scary error.
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState !== 'visible') return;
+    if (resetScreen.classList.contains('hidden')) return;
+    if (state.ws && state.ws.readyState === WebSocket.OPEN) return;
+    resetSocketDropped();
+  });
   resetResend.addEventListener('click', function (e) {
     e.preventDefault();
     doRequestReset(); // server rate-limits resends per account
